@@ -4,7 +4,9 @@ qb_rename_move.py — qBittorrent 番剧下载完成 → 自动改名 → 移动
 
 流程:
   1. qBittorrent "下载完成后运行外部程序" 触发本脚本(仅指定分类的任务, 其他种子一律跳过)
-  2. 将任务媒体文件**直接移动**到独立工作区(不做种/不用硬链接, 暂存不留副本)
+  2. 将任务媒体文件转移到独立工作区, 方式可选(TRANSFER_MODE):
+       "no_seed" 不做种: 直接移动(暂存不留副本, 种子任务按 SEED_ACTION 处理)
+       "seed"    做种:   硬链接(跨盘回退复制), 下载目录原文件保留, qB 继续做种
   3. 在工作区调用外部改名工具(自动喂入 y 确认), 校验输出
   4. 搜索匹配目标文件夹(全部库根):
        缓存 → 库内已有目录(忽略年份/繁简/标点) → Bangumi 规范名对齐 → ani-rss 目录名回退
@@ -30,6 +32,8 @@ qBittorrent 设置(下载完成后运行外部程序):
   python qb_rename_move.py            # qB autorun 正常入口
   python qb_rename_move.py --retry    # 重扫 待归档\ 目录补归档
   python qb_rename_move.py --dry-run  # 演练(工作区用硬链接, 不动真实文件)
+  python qb_rename_move.py --seed     # 本次运行强制做种(硬链接/复制, 保留源文件)
+  python qb_rename_move.py --no-seed  # 本次运行强制不做种(直接移动)
 """
 
 
@@ -80,8 +84,16 @@ VENDOR_DIR = os.path.join(STAGE_DIR, "_vendor")     # 本地依赖(zhconv 繁简
 BANGUMI_CATEGORIES = {_env("QBR_CATEGORY", "ani-rss")}
 BANGUMI_TAGS = set()
 
-# 入库方式: 直接移动(不做种/不留暂存副本)。种子若仍在 qB 中会显示缺失文件, 属预期
-SEED_ACTION = _env("QBR_SEED_ACTION", "delete")   # "delete"=入库后删除 qB 种子任务 | "keep"=不动
+# 入库后对 qB 中种子任务的处理(仅不做种模式生效):
+#   "delete"=删除种子任务(默认) | "pause"=暂停 | "keep"=不动
+# 做种模式(TRANSFER_MODE="seed")下本项被忽略, 种子任务一律保留继续上传
+SEED_ACTION = _env("QBR_SEED_ACTION", "delete")
+# 转移方式可选(做种开关):
+#   "no_seed" 不做种: 媒体文件从暂存直接移动到工作区, 不留副本; 入库后种子按 SEED_ACTION 处理
+#   "seed"    做种:   工作区用硬链接(同盘瞬时、不占额外空间), 跨盘自动回退为复制;
+#                     下载目录原文件保留, qB 继续做种, 入库后不动 qB 种子任务
+# 命令行可用 --seed / --no-seed 临时覆盖本配置
+TRANSFER_MODE = _env("QBR_TRANSFER_MODE", "no_seed").lower()   # "no_seed" | "seed"
 QB_HOST = _env("QBR_QB_HOST", "http://127.0.0.1:8080")
 QB_API_KEY = _env("QBR_QB_APIKEY", "")            # qB WebUI API Key(必须配置)
 
@@ -234,9 +246,12 @@ def collect_media_files(content_path):
     return result
 
 
-def move_to_workdir(media_files, workdir, dry_run=False):
-    """把任务媒体文件移到工作区。正式运行=直接移动(同盘瞬时 rename, 暂存不留副本);
-    演练(--dry-run)=硬链接/复制(绝不破坏暂存源文件)。返回是否发生了跨盘复制。"""
+def move_to_workdir(media_files, workdir, dry_run=False, keep_source=False):
+    """把任务媒体文件转移到工作区, 返回是否使用了复制(跨盘)。
+
+    keep_source=False(不做种): 直接移动——同盘瞬时 rename, 暂存不留副本
+    keep_source=True(做种/演练): 先尝试硬链接(同盘不占额外空间, 下载目录原文件
+        保留给 qB 继续做种), 跨盘时回退为 copy2 复制, 绝不动暂存源文件"""
     os.makedirs(workdir, exist_ok=True)
     used_copy = False
     seen = set()
@@ -249,10 +264,14 @@ def move_to_workdir(media_files, workdir, dry_run=False):
             i += 1
         seen.add(dst.lower())
         try:
-            if dry_run:
-                os.link(full, dst)  # 演练: 硬链接, 不动源文件
+            if keep_source:
+                try:
+                    os.link(full, dst)  # 做种/演练: 硬链接, 不动源文件
+                except OSError:
+                    shutil.copy2(full, dst)  # 跨盘无法硬链接, 回退复制
+                    used_copy = True
             else:
-                shutil.move(full, dst)
+                shutil.move(full, dst)  # 不做种: 直接移动
         except OSError:
             shutil.copy2(full, dst)
             used_copy = True
@@ -1316,6 +1335,9 @@ def qb_api(path, data=None):
 
 
 def seed_action(hash_id, torrent_name):
+    if TRANSFER_MODE == "seed":
+        log(f"做种模式: 保留种子任务继续上传, 不动 qB | {torrent_name}")
+        return
     if SEED_ACTION not in ("pause", "delete") or not hash_id:
         return
     try:
@@ -1350,9 +1372,12 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
         return
 
     workdir = os.path.join(WORK_DIR, f"{(hash_id or 'manual')[:12]}_{now().strftime('%H%M%S')}")
-    used_copy = move_to_workdir(media_files, workdir, dry_run=dry_run)
+    keep_source = dry_run or TRANSFER_MODE == "seed"
+    used_copy = move_to_workdir(media_files, workdir, dry_run=dry_run, keep_source=keep_source)
     if used_copy:
-        log("存在跨盘文件, 使用复制而非直接移动(暂存源文件保留)", "WARN")
+        log("存在跨盘文件, 无法硬链接, 使用复制(暂存源文件保留)", "WARN")
+    if TRANSFER_MODE == "seed" and not dry_run:
+        log("做种模式: 下载目录原文件保留, qB 继续做种; 工作区为硬链接副本")
     staged_dirs = list({os.path.dirname(full) for full, _rel in media_files})
 
     try:
@@ -1388,7 +1413,8 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
             if not dry_run:
                 seed_action(hash_id, torrent_name)
         if not dry_run:
-            # 直接移动语义: 暂存中已移出的目录若已为空则逐级清理
+            # 不做种模式下暂存中已移出的目录若已为空则逐级清理;
+            # 做种模式下原文件仍在, 目录非空, 此处自然不会删除
             removed = prune_empty_dirs(staged_dirs)
             if removed:
                 log(f"已清理空的暂存目录 {len(removed)} 个: " + "; ".join(
@@ -1399,9 +1425,14 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
 
 
 def main():
+    global TRANSFER_MODE
     argv = list(sys.argv[1:])
     dry_run = "--dry-run" in argv
-    argv = [a for a in argv if a != "--dry-run"]
+    if "--seed" in argv:
+        TRANSFER_MODE = "seed"
+    elif "--no-seed" in argv:
+        TRANSFER_MODE = "no_seed"
+    argv = [a for a in argv if a not in ("--dry-run", "--seed", "--no-seed")]
 
     if "--retry" in argv:
         # 重试待归档目录(无需 qB 参数)

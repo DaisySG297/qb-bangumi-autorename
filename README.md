@@ -24,19 +24,21 @@
 
 ```mermaid
 flowchart LR
-    A["qB 任务完成<br/>分类=ani-rss"] --> B["直接移动到工作区<br/>不做种/不留副本"]
-    B --> C["调用改名工具<br/>GBK 占位符保护"]
+    A["qB 任务完成<br/>分类=ani-rss"] --> B["转移到工作区<br/>做种方式可选"]
+    B -->|"不做种(默认)<br/>直接移动, 不留副本"| C["调用改名工具<br/>GBK 占位符保护"]
+    B -->|"做种<br/>硬链接/复制, 原文件保留"| C
     C --> D{"四级搜索匹配<br/>缓存→库内目录→Bangumi→ani-rss"}
     D --> E["TMDB 三重对齐<br/>年份/季/集"]
     E -->|匹配成功| F["入库 库根#92;番剧 (年份)#92;Season N"]
     E -->|未匹配| G["待归档#92; 不入库<br/>--retry 补归档"]
-    F --> H["删除 qB 任务 + 清理空目录"]
+    F --> H["不做种: 删 qB 任务<br/>做种: 保留继续上传"]
 ```
 
 <div align="center"><img src="docs/rules.svg" alt="TMDB 对齐三规则" width="85%"/></div>
 
 ## 特性
 
+- **做种方式可选**：`QBR_TRANSFER_MODE="no_seed"`（默认，直接移动不留副本）或 `"seed"`（硬链接/复制，下载目录原文件保留继续做种，入库后不动 qB 任务）；命令行 `--seed` / `--no-seed` 可临时覆盖
 - **免 TMDB API Key**：经 Emby 服务端的 `RemoteSearch` 反查 TMDB 首播年与季结构
 - **四级搜索匹配制**：缓存 → 库内已有目录（繁简/标点/年份归一）→ Bangumi API 规范名对齐 → ani-rss 目录名回退；**匹配不到就不入库**，绝不猜测建目录
 - **多库根支持**：E/F 等多个媒体库根全部搜索，同一部番不因「库里有但没搜到」而分叉
@@ -80,7 +82,8 @@ pip install zhconv   # 繁简转换（也可放到脚本同目录 _vendor/ 下�
 | `QBR_EMBY_HOST` | （空） | Emby 服务器地址，如 `http://192.168.1.10:8096` |
 | `QBR_EMBY_APIKEY` | （空） | Emby API Key |
 | `QBR_CATEGORY` | `ani-rss` | 只处理该分类的种子 |
-| `QBR_SEED_ACTION` | `delete` | 入库后删除 qB 种子任务（`keep` 则不动） |
+| `QBR_TRANSFER_MODE` | `no_seed` | 转移方式：`no_seed`=不做种，直接移动不留副本；`seed`=做种，硬链接/复制保留原文件 |
+| `QBR_SEED_ACTION` | `delete` | 仅不做种模式生效：入库后删除 qB 种子任务（`pause` 暂停 / `keep` 不动）；做种模式下忽略，任务一律保留 |
 
 ## qBittorrent 触发配置
 
@@ -98,6 +101,8 @@ pythonw.exe C:\path\to\qb_rename_move.py "%N" "%F" "%D" "%L" "%G" "%I"
 python qb_rename_move.py            # qB autorun 正常入口
 python qb_rename_move.py --retry    # 重扫 待归档\ 目录补归档（建议挂每日计划任务）
 python qb_rename_move.py --dry-run  # 演练：工作区用硬链接，不动真实文件
+python qb_rename_move.py --seed     # 本次运行强制做种（硬链接/复制，保留下载目录原文件）
+python qb_rename_move.py --no-seed  # 本次运行强制不做种（直接移动，不留副本）
 ```
 
 ## 命名规则总览
