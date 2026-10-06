@@ -24,13 +24,13 @@
 
 ```mermaid
 flowchart LR
-    A[qB 任务完成<br/>分类=ani-rss] --> B[直接移动到工作区<br/>不做种/不留副本]
-    B --> C[调用改名工具<br/>GBK 占位符保护]
-    C --> D{四级搜索匹配<br/>缓存→库内目录→Bangumi→ani-rss}
-    D --> E[TMDB 三重对齐<br/>年份/季/集]
-    E -->|匹配成功| F[入库 库根\番剧 \(年份\)\Season N]
-    E -->|未匹配| G[待归档\ 不入库<br/>--retry 补归档]
-    F --> H[删除 qB 任务 + 清理空目录]
+    A["qB 任务完成<br/>分类=ani-rss"] --> B["直接移动到工作区<br/>不做种/不留副本"]
+    B --> C["调用改名工具<br/>GBK 占位符保护"]
+    C --> D{"四级搜索匹配<br/>缓存→库内目录→Bangumi→ani-rss"}
+    D --> E["TMDB 三重对齐<br/>年份/季/集"]
+    E -->|匹配成功| F["入库 库根#92;番剧 (年份)#92;Season N"]
+    E -->|未匹配| G["待归档#92; 不入库<br/>--retry 补归档"]
+    F --> H["删除 qB 任务 + 清理空目录"]
 ```
 
 <div align="center"><img src="docs/rules.svg" alt="TMDB 对齐三规则" width="85%"/></div>
@@ -125,7 +125,7 @@ python qb_rename_move.py --dry-run  # 演练：工作区用硬链接，不动真
 本项目的诞生站在这些优秀项目/服务的肩膀上，特别感谢：
 
 - **[bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)** —— 「番剧批量重命名(字幕版)」番剧改名 CLI（PyInstaller 打包），本链路的核心改名能力来源，本项目的姊妹仓库
-- **[ani-rss](https://github.com/ani-rss/ani-rss)** —— 番剧 RSS 自动下载，链路的上游触发源
+- **[ani-rss](https://github.com/wushuo894/ani-rss)** —— 基于 RSS 自动追番/订阅/下载/刮削，链路的上游触发源
 - **[qBittorrent](https://www.qbittorrent.org/)** 及其 WebUI API —— 下载与完成事件触发
 - **[Emby](https://emby.media/)** —— 媒体库与其 `RemoteSearch` 接口（本项目免 Key 反查 TMDB 的关键）
 - **[Bangumi API](https://github.com/bangumi/api)** (bgm.tv) —— 条目规范名与别名解析
