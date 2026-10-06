@@ -135,6 +135,7 @@ python qb_rename_move.py --no-seed  # 本次运行强制不做种（直接移动
 - **[Bangumi API](https://github.com/bangumi/api)** (bgm.tv) —— 条目规范名与别名解析
 - **[TMDB](https://www.themoviedb.org/)** —— 剧集首播年/季结构/每季集数的权威数据源
 - **[zhconv](https://pypi.org/project/zhconv/)** —— 中文繁简转换，搜索匹配归一的基础
+- **各汉化字幕组 / 压制组** —— 番剧中文字幕与压制资源的源头，本链路处理的正是他们的劳动成果
 
 ## 开源协议
 
