@@ -1,0 +1,26 @@
+# 运行产物
+logs/
+bgm_cache.json
+bgm_cache.json.bak*
+failures.jsonl
+_work/
+待归档/
+_残留待处理/
+_同名冲突备份/
+_vendor/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 本地第三方工具(不入库)
+*.exe
+*.dll
+*.pyd
+
+# 系统
+Thumbs.db
+Desktop.ini

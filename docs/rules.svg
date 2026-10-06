@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 620" font-family="'Segoe UI','Microsoft YaHei',sans-serif">
+  <rect width="920" height="620" fill="#f8fafc"/>
+  <text x="460" y="40" text-anchor="middle" font-size="20" font-weight="700" fill="#0f172a">三条 TMDB 对齐规则（Emby 识别的前提）</text>
+
+  <!-- Rule B: year -->
+  <rect x="40" y="70" width="840" height="160" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.5"/>
+  <rect x="40" y="70" width="840" height="34" rx="12" fill="#fef9c3"/>
+  <text x="60" y="93" font-size="14" font-weight="700" fill="#854d0e">规则 B · 目录年份 = TMDB 首播年（与第几季无关）</text>
+  <text x="60" y="130" font-size="12.5" fill="#334155">Emby 用「剧名 + 年份」检索 TMDB，年份不符 → 0 条结果 → ProviderIds 为空（无封面/简介/剧集信息，且不报错）</text>
+  <rect x="90" y="150" width="300" height="52" rx="8" fill="#fef2f2" stroke="#ef4444" stroke-width="1.2"/>
+  <text x="240" y="172" text-anchor="middle" font-size="13" font-weight="700" fill="#b91c1c">✗ 青之芦苇 (2026)</text>
+  <text x="240" y="192" text-anchor="middle" font-size="11.5" fill="#7f1d1d">第二季播出年 → 匹配失败</text>
+  <text x="420" y="181" font-size="20" fill="#64748b">→</text>
+  <rect x="470" y="150" width="300" height="52" rx="8" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.2"/>
+  <text x="620" y="172" text-anchor="middle" font-size="13" font-weight="700" fill="#15803d">✓ 青之芦苇 (2022)</text>
+  <text x="620" y="192" text-anchor="middle" font-size="11.5" fill="#166534">TMDB 首播年 → Tmdb=126437</text>
+
+  <!-- Rule C: season merge -->
+  <rect x="40" y="250" width="840" height="160" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.5"/>
+  <rect x="40" y="250" width="840" height="34" rx="12" fill="#dbeafe"/>
+  <text x="60" y="273" font-size="14" font-weight="700" fill="#1e40af">规则 C · 多 cours 合单季时，多余 Season 归并到 TMDB 实际存在的季</text>
+  <text x="60" y="310" font-size="12.5" fill="#334155">ani-rss 按播出 cours 拆 Season 1/2/3，但 TMDB 把 2024 版乱马½ 建成单季「本篇」36 集连续编号</text>
+  <rect x="90" y="330" width="300" height="52" rx="8" fill="#fef2f2" stroke="#ef4444" stroke-width="1.2"/>
+  <text x="240" y="352" text-anchor="middle" font-size="13" font-weight="700" fill="#b91c1c">✗ Season 3\S03E25（幽灵季）</text>
+  <text x="240" y="372" text-anchor="middle" font-size="11.5" fill="#7f1d1d">TMDB 无 Season 3 → 元数据全空</text>
+  <text x="420" y="361" font-size="20" fill="#64748b">→</text>
+  <rect x="470" y="330" width="300" height="52" rx="8" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.2"/>
+  <text x="620" y="352" text-anchor="middle" font-size="13" font-weight="700" fill="#15803d">✓ Season 1\S01E25（本篇 36 集）</text>
+  <text x="620" y="372" text-anchor="middle" font-size="11.5" fill="#166534">集号不变 · TMDB 第 25 集</text>
+
+  <!-- Rule D: episode renumber -->
+  <rect x="40" y="430" width="840" height="160" rx="12" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.5"/>
+  <rect x="40" y="430" width="840" height="34" rx="12" fill="#fae8ff"/>
+  <text x="60" y="453" font-size="14" font-weight="700" fill="#86198f">规则 D · 跨季连续集号 → TMDB 每季重排编号</text>
+  <text x="60" y="490" font-size="12.5" fill="#334155">ani-rss 有时给后续季文件用跨季连续集号（S1 共 13 集，S2 第一集被标 E14）；TMDB/Emby 的季内集号从 1 重排</text>
+  <rect x="90" y="510" width="300" height="52" rx="8" fill="#fef2f2" stroke="#ef4444" stroke-width="1.2"/>
+  <text x="240" y="532" text-anchor="middle" font-size="13" font-weight="700" fill="#b91c1c">✗ 异人旅馆 S02E14（13 + 1）</text>
+  <text x="240" y="552" text-anchor="middle" font-size="11.5" fill="#7f1d1d">Emby 按 E14 找分集元数据</text>
+  <text x="420" y="541" font-size="20" fill="#64748b">→</text>
+  <rect x="470" y="510" width="300" height="52" rx="8" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.2"/>
+  <text x="620" y="532" text-anchor="middle" font-size="13" font-weight="700" fill="#15803d">✓ S02E01（offset = S1 集数和）</text>
+  <text x="620" y="552" text-anchor="middle" font-size="11.5" fill="#166534">TMDB 周更滞后时按本地前集链放行</text>
+</svg>

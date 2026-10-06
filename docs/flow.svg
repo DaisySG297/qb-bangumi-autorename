@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 560" font-family="'Segoe UI','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="920" height="560" fill="#f8fafc"/>
+  <text x="460" y="38" text-anchor="middle" font-size="20" font-weight="700" fill="#0f172a">整体流程：下载完成 → 自动改名 → TMDB 对齐 → 入库 Emby</text>
+
+  <!-- 1 qB -->
+  <rect x="40" y="70" width="200" height="64" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="140" y="96" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">qBittorrent 任务完成</text>
+  <text x="140" y="118" text-anchor="middle" font-size="12" fill="#334155">仅分类 = ani-rss 的种子</text>
+
+  <!-- 2 work -->
+  <rect x="300" y="70" width="200" height="64" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="400" y="96" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">直接移动到工作区</text>
+  <text x="400" y="118" text-anchor="middle" font-size="12" fill="#334155">不做种 / 不留副本</text>
+
+  <!-- 3 rename -->
+  <rect x="560" y="70" width="200" height="64" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="660" y="96" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">调用改名工具</text>
+  <text x="660" y="118" text-anchor="middle" font-size="12" fill="#334155">GBK 超集字符占位符保护</text>
+
+  <line x1="240" y1="102" x2="296" y2="102" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="500" y1="102" x2="556" y2="102" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 4 search -->
+  <rect x="120" y="180" width="680" height="88" rx="10" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.5"/>
+  <text x="460" y="206" text-anchor="middle" font-size="14" font-weight="700" fill="#15803d">四级搜索匹配目标文件夹（全部库根，繁简 / 标点归一）</text>
+  <text x="460" y="232" text-anchor="middle" font-size="12.5" fill="#334155">缓存 → 库内已有目录 → Bangumi API 规范名对齐 → ani-rss 目录名回退</text>
+  <text x="460" y="254" text-anchor="middle" font-size="12" fill="#64748b">规则 A：库内已有同一部番时对齐既有目录，绝不另建分叉目录</text>
+  <line x1="660" y1="134" x2="500" y2="176" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 5 TMDB align -->
+  <rect x="120" y="300" width="680" height="96" rx="10" fill="#fefce8" stroke="#eab308" stroke-width="1.5"/>
+  <text x="460" y="326" text-anchor="middle" font-size="14" font-weight="700" fill="#a16207">TMDB 对齐（经 Emby 反查，免 TMDB API Key）</text>
+  <text x="460" y="350" text-anchor="middle" font-size="12.5" fill="#334155">规则 B 年份 = TMDB 首播年（改目录 + tvshow.nfo）&#160;&#160;|&#160;&#160;规则 C 多 cours 合单季 → Season 归并</text>
+  <text x="460" y="372" text-anchor="middle" font-size="12.5" fill="#334155">规则 D 跨季连续集号 → 每季重排编号（S02E14 → S02E01）</text>
+  <line x1="460" y1="268" x2="460" y2="296" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 6 library -->
+  <rect x="140" y="440" width="280" height="72" rx="10" fill="#eef2ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="280" y="466" text-anchor="middle" font-size="14" font-weight="700" fill="#4338ca">入库</text>
+  <text x="280" y="490" text-anchor="middle" font-size="12" fill="#334155">&lt;库根&gt;\番剧 (年份)\Season N\ · 删除 qB 任务</text>
+  <line x1="360" y1="396" x2="300" y2="436" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- 7 pending -->
+  <rect x="500" y="440" width="280" height="72" rx="10" fill="#fef2f2" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="640" y="466" text-anchor="middle" font-size="14" font-weight="700" fill="#b91c1c">未匹配 → 待归档\（不入库）</text>
+  <text x="640" y="490" text-anchor="middle" font-size="12" fill="#334155">--retry 重扫补归档 · 同名冲突先备份绝不覆盖</text>
+  <line x1="560" y1="396" x2="620" y2="436" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+</svg>

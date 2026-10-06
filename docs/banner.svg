@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" font-family="'Segoe UI','Microsoft YaHei',sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="0.55" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#312e81"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#818cf8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="300" fill="url(#bg)"/>
+  <circle cx="1010" cy="60" r="150" fill="#38bdf8" opacity="0.08"/>
+  <circle cx="1090" cy="240" r="110" fill="#818cf8" opacity="0.10"/>
+
+  <!-- download arrow motif -->
+  <g transform="translate(940,86)" opacity="0.9">
+    <rect x="0" y="0" width="180" height="128" rx="16" fill="#0b1220" stroke="#475569" stroke-width="1.5"/>
+    <rect x="0" y="0" width="180" height="30" rx="16" fill="#1e293b"/>
+    <circle cx="20" cy="15" r="5" fill="#ef4444"/><circle cx="40" cy="15" r="5" fill="#f59e0b"/><circle cx="60" cy="15" r="5" fill="#22c55e"/>
+    <path d="M 90 42 L 90 84 M 74 70 L 90 86 L 106 70" stroke="url(#accent)" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="46" y="98" width="88" height="8" rx="4" fill="#334155"/>
+    <rect x="46" y="98" width="62" height="8" rx="4" fill="url(#accent)"/>
+  </g>
+
+  <text x="70" y="118" font-size="44" font-weight="800" fill="#f8fafc">qb-bangumi-autorename</text>
+  <text x="70" y="158" font-size="20" fill="#cbd5e1">qBittorrent 下载完成 → 自动改名 → TMDB 对齐 → 入库 Emby</text>
+
+  <g font-size="14" fill="#e2e8f0">
+    <rect x="70" y="196" width="150" height="34" rx="17" fill="#1e293b" stroke="#475569"/>
+    <text x="145" y="218" text-anchor="middle">免 TMDB API Key</text>
+    <rect x="234" y="196" width="168" height="34" rx="17" fill="#1e293b" stroke="#475569"/>
+    <text x="318" y="218" text-anchor="middle">繁简归一搜索匹配</text>
+    <rect x="416" y="196" width="190" height="34" rx="17" fill="#1e293b" stroke="#475569"/>
+    <text x="511" y="218" text-anchor="middle">年份 / 季 / 集 三重对齐</text>
+    <rect x="620" y="196" width="146" height="34" rx="17" fill="#1e293b" stroke="#475569"/>
+    <text x="693" y="218" text-anchor="middle">未匹配不入库</text>
+  </g>
+  <rect x="70" y="252" width="260" height="4" rx="2" fill="url(#accent)"/>
+</svg>
