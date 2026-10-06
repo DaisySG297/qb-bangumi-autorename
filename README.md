@@ -64,7 +64,7 @@ git clone https://github.com/DaisySG297/qb-bangumi-autorename.git
 pip install zhconv   # 繁简转换（也可放到脚本同目录 _vendor/ 下）
 ```
 
-**自备第三方改名工具**：本项目驱动一个独立的番剧批量改名 CLI（PyInstaller 打包，只扫描其工作目录、执行前从 stdin 读入 `y` 确认），将其路径配置到 `QBR_RENAME_EXE`。改名工具本身不在本项目分发范围内，见[鸣谢](#鸣谢)。
+**自备改名工具**：本项目驱动一个独立的番剧批量改名 CLI（PyInstaller 打包，只扫描其工作目录、执行前从 stdin 读入 `y` 确认），将其路径配置到 `QBR_RENAME_EXE`。该工具见姊妹仓库 [bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)，详见[鸣谢](#鸣谢)。
 
 ## 配置
 
@@ -124,7 +124,7 @@ python qb_rename_move.py --dry-run  # 演练：工作区用硬链接，不动真
 
 本项目的诞生站在这些优秀项目/服务的肩膀上，特别感谢：
 
-- **「番剧批量重命名(字幕版)」改名工具** —— 第三方番剧改名 CLI（PyInstaller 打包），本链路的核心改名能力来源；独立分发、需自备，感谢原作者
+- **[bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)** —— 「番剧批量重命名(字幕版)」番剧改名 CLI（PyInstaller 打包），本链路的核心改名能力来源，本项目的姊妹仓库
 - **[ani-rss](https://github.com/ani-rss/ani-rss)** —— 番剧 RSS 自动下载，链路的上游触发源
 - **[qBittorrent](https://www.qbittorrent.org/)** 及其 WebUI API —— 下载与完成事件触发
 - **[Emby](https://emby.media/)** —— 媒体库与其 `RemoteSearch` 接口（本项目免 Key 反查 TMDB 的关键）
