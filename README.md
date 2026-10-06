@@ -136,6 +136,12 @@ python qb_rename_move.py --no-seed  # 本次运行强制不做种（直接移动
 - **[TMDB](https://www.themoviedb.org/)** —— 剧集首播年/季结构/每季集数的权威数据源
 - **[zhconv](https://pypi.org/project/zhconv/)** —— 中文繁简转换，搜索匹配归一的基础
 
-## License
+## 开源协议
 
-[MIT](LICENSE)
+本项目基于 [MIT License](LICENSE) 开源，欢迎自由使用、修改与分发。
+
+<div align="center">
+
+**如果这个工具对你有帮助，欢迎点一个 ⭐ Star 支持一下！**
+
+</div>
