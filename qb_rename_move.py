@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
+r"""
 qb_rename_move.py — qBittorrent 番剧下载完成 → 自动改名 → 移动入库 Emby 媒体库
 
 流程:
@@ -22,7 +22,8 @@ qb_rename_move.py — qBittorrent 番剧下载完成 → 自动改名 → 移动
   5. 季号以 ani-rss(TMDB) 为准, 同步修正文件名 Sxx
   6. 匹配成功 → 移入 <库根>\<文件夹>\Season N\;
      未匹配   → 不入库, 改名后文件移入 <暂存目录>\待归档\<任务名>\, 可 --retry 重试
-  7. 同名冲突: 同大小→丢弃新文件(去重); 不同大小→旧文件移入冲突备份目录, 新文件入库
+  7. 同集冲突(按主/备组角色): 主组已在库→备组新文件直接丢弃; 新到主组、库内为备组→整套替换(旧移冲突备份);
+     角色不明(未配 ani-rss API / 认不出组名)→ 同大小去重 / 不同大小新文件移入冲突备份
   8. 处理完成后清理暂存中变空的目录; 无法识别残留 → _残留待处理; 全程写日志+failures.jsonl
 
 qBittorrent 设置(下载完成后运行外部程序):
@@ -35,12 +36,6 @@ qBittorrent 设置(下载完成后运行外部程序):
   python qb_rename_move.py --seed     # 本次运行强制做种(硬链接/复制, 保留源文件)
   python qb_rename_move.py --no-seed  # 本次运行强制不做种(直接移动)
 """
-
-
-def _env_placeholder():
-    pass
-
-
 
 import json
 import os
@@ -55,10 +50,8 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
 
-
 # ============================== 配置 ==============================
 # 全部个人化配置均可通过环境变量覆盖(见 README), 下方为带示例的默认值。
-
 def _env(name, default=""):
     v = os.environ.get(name)
     return v if v else default
@@ -66,13 +59,14 @@ def _env(name, default=""):
 # --- 路径 ---
 # 改名工具(第三方 exe, 需自备; 只扫描其工作目录, 执行前从 stdin 读入 y 确认)
 RENAME_EXE = _env("QBR_RENAME_EXE", r"C:\Tools\番剧批量重命名(字幕版).exe")
-# 媒体库根目录列表(多个根用 | 分隔): 匹配既有番剧目录时全部搜索, 避免漏配另建分叉目录
+# 媒体库根目录列表(多个根用 | 分隔): 匹配既有番剧目录时全部搜索; 新建目录落在第一个根
 LIBRARY_DIRS = [p.strip() for p in
                 _env("QBR_LIBRARY_DIRS", r"D:\Media\Bangumi").split("|") if p.strip()]
 DEFAULT_LIBRARY_DIR = LIBRARY_DIRS[0]
+# 冲突备份目录(建议放在 Emby 库根之外, 否则会被 Emby 索引成幽灵条目)
 CONFLICT_DIR = _env("QBR_CONFLICT_DIR", os.path.join(DEFAULT_LIBRARY_DIR, "_同名冲突备份"))
-STAGE_DIR = _env("QBR_STAGE_DIR", os.path.dirname(os.path.abspath(__file__)))
 # 暂存根目录(ani-rss 下载目录), 处理后应清空
+STAGE_DIR = _env("QBR_STAGE_DIR", os.path.dirname(os.path.abspath(__file__)))
 WORK_DIR = os.path.join(STAGE_DIR, "_work")
 LEFTOVER_DIR = os.path.join(STAGE_DIR, "_残留待处理")
 UNMATCHED_DIR = os.path.join(STAGE_DIR, "待归档")   # 搜索不到目标文件夹时, 改名后的文件暂存于此
@@ -95,19 +89,26 @@ SEED_ACTION = _env("QBR_SEED_ACTION", "delete")
 # 命令行可用 --seed / --no-seed 临时覆盖本配置
 TRANSFER_MODE = _env("QBR_TRANSFER_MODE", "no_seed").lower()   # "no_seed" | "seed"
 QB_HOST = _env("QBR_QB_HOST", "http://127.0.0.1:8080")
-QB_API_KEY = _env("QBR_QB_APIKEY", "")            # qB WebUI API Key(必须配置)
+QB_API_KEY = _env("QBR_QB_APIKEY", "")            # qB WebUI API Key(删除种子需要; 留空则跳过)
+
+# ani-rss API(主/备组角色识别): 同集冲突时主组替换备组、备组遇已入库主组直接丢弃。
+# 留空 QBR_ANIRSS_HOST/KEY 则跳过角色识别, 退回通用冲突规则(去重/备份)。
+# 注意: ani-rss 的 API Key 即 WebUI 的 apiKey(设置页可见)。
+ANIRSS_API_BASE = _env("QBR_ANIRSS_HOST", "")
+ANIRSS_API_KEY = _env("QBR_ANIRSS_KEY", "")
+ANIRSS_ROLES_TTL = 600   # 订阅角色缓存秒数
 
 USE_BGM_API = True          # 通过 Bangumi API 获取 中文名; 失败时回退原名
-BGM_UA = _env("QBR_BGM_UA", "qb-bangumi-autorename/1.0 (" + "https://github.com/DaisySG297/qb-bangumi-autorename" + ")")
+BGM_UA = _env("QBR_BGM_UA", "qb-bangumi-autorename/1.0")
 
 # --- TMDB 首播年权威来源(经 Emby 服务端的 RemoteSearch 反查, 无需 TMDB API Key) ---
-# 为什么必须用 TMDB: Emby 剧集匹配完全依赖 TMDB 的 "首播年"。若目录/nfo 里的年份
+# 为什么必须用 TMDB: Emby 剧集匹配完全依赖 TMDB 的 "首播年"。若目录/ nfo 里的年份
 # 写成"第二季播出的年份"(如 青之芦苇 (2026)), Emby 按该年检索 TMDB 会得到 0 条结果,
 # 条目退化为无元数据(ProviderIds 为空, 无封面/简介/剧集信息)。
 # 因此目录年份必须对齐 TMDB 上该剧 first_air_date 的年份, 与第几季无关。
 USE_TMDB_YEAR = True
-EMBY_HOST = _env("QBR_EMBY_HOST", "")             # 例: http://192.168.1.10:8096
-EMBY_API_KEY = _env("QBR_EMBY_APIKEY", "")        # Emby API Key
+EMBY_HOST = _env("QBR_EMBY_HOST", "")
+EMBY_API_KEY = _env("QBR_EMBY_APIKEY", "")
 TMDB_YEAR_TOLERANCE = 1     # 库内目录年份与 TMDB 首播年相差 > 该值时视为需校正
 # 同名不同版作品(如 乱马½ 1989 版 / 2024 重制版)在 TMDB 是独立条目。
 # ani-rss 目录年份=该季播出年, 与既有目录(第一季/旧版)年份差超过该值时不视为同一部,
@@ -127,7 +128,6 @@ CN_NUM = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 
           11: "十一", 12: "十二"}
 TZ8 = timezone(timedelta(hours=8))
 # ==================================================================
-
 
 
 def now():
@@ -487,9 +487,77 @@ def match_existing_folder(title, hint_year=None):
     return None
 
 
+FRANCHISE_MIN_LEN = 4    # 归一化后公共名最短长度(字符), 低于此不做包含式匹配
+FRANCHISE_YEAR_GAP = 30  # 系列包含匹配的年份容忍(长播系列如 JOJO 2012 起播、2026 仍有新季)
+
+
+def match_franchise_folder(title, hint_year=None, min_len=FRANCHISE_MIN_LEN):
+    r"""系列名包含匹配(直接同名匹配失败后的二级匹配)。
+
+    场景: 库内是系列主条目「JOJO的奇妙冒险（2012）」，而新番标题是
+    「飙马野郎 JOJO的奇妙冒险 第一赛段」——名字不等, 但库内目录名(去季标记)
+    是候选标题的子串, 属同一系列(该系列在 TMDB 是同一剧集的不同季)。此时按
+    同一目录归档, 由季归并逻辑(按 TMDB 季名)决定落入哪一季。
+
+    仅在 ①同名匹配/②ani-rss 名匹配/③Bangumi 规范名匹配 均失败后调用。
+    年份容忍放宽到 FRANCHISE_YEAR_GAP(长播系列首播年到新季播出年可能相差十年以上),
+    多个候选时取公共名最长者, 同长取年份最接近者。返回 (库根, 目录名) 或 None。"""
+    want = _norm_text(t2s(title))
+    if not want:
+        return None
+    best = None
+    for root in LIBRARY_DIRS:
+        try:
+            names = os.listdir(root)
+        except OSError:
+            continue
+        for name in names:
+            full = os.path.join(root, name)
+            if not os.path.isdir(full):
+                continue
+            base, dir_year = split_folder_year(name)
+            nb = _norm_text(t2s(base))
+            if len(nb) < min_len or nb == want or nb not in want:
+                continue
+            gap = abs(int(dir_year) - int(hint_year)) if (hint_year and dir_year) else 0
+            if gap > FRANCHISE_YEAR_GAP:
+                log(f"跳过系列包含匹配: {name} (年份 {dir_year} 与参考 {hint_year} "
+                    f"相差 {gap} 年, 判为不同作品)", "WARN")
+                continue
+            score = (len(nb), -gap)
+            if best is None or score > best[2]:
+                best = (root, name, score)
+    if best:
+        if hint_year:
+            _b, _y = split_folder_year(best[1])
+            if _y and abs(int(_y) - int(hint_year)) > YEAR_SPLIT_GAP:
+                log(f"系列包含匹配跨年份(首播 {_y} / 本季参考 {hint_year}): {best[1]}", "WARN")
+        return best[0], best[1]
+    return None
+
+
+def resolved_name_hint(title, season):
+    """读取解析阶段缓存的规范基础名(Bangumi name_cn 等), 供季名匹配使用。
+    优先精确匹配该季, 其次取该标题任意一季的规范名(季号可能已被 ani-rss 校正过)"""
+    try:
+        cache = load_cache()
+    except Exception:
+        return None
+    t = (title or "").casefold()
+    exact = cache.get(f"{t}|S{season}|base")
+    if exact:
+        return exact
+    for k, v in cache.items():
+        if k.endswith("|base") and k.startswith(f"{t}|S"):
+            return v
+    return None
+
+
 def split_folder_year(folder_name):
-    """拆分目录名为 (基础名, 年份或'')"""
-    m = re.match(r"^(?P<base>.+?)\s*\((?P<year>(?:19|20)\d{2})\)\s*$", folder_name or "")
+    """拆分目录名为 (基础名, 年份或'')。年份分隔支持半角/全角括号
+    (库内既有目录实测混用, 如「JOJO的奇妙冒险（2012）」)"""
+    m = re.match(r"^(?P<base>.+?)\s*[（(]\s*(?P<year>(?:19|20)\d{2})\s*[)）]\s*$",
+                 folder_name or "")
     if m:
         return m.group("base").strip(), m.group("year")
     return (folder_name or "").strip(), ""
@@ -721,7 +789,7 @@ ANI_RSS_DIR_RE = re.compile(r"^(?P<name>.+?)\s*\((?:19|20)\d{2}\)$")
 def ani_rss_layout(content_path):
     r"""解析 ani-rss 建立的结构 "<名称> (年份)\Season N\", 返回 (目录名, 季号);
     非该结构返回 (None, None)。
-    例: <暂存目录>\异人旅馆 (2026)\Season 2\a.mp4 -> ("异人旅馆 (2026)", 2)"""
+    例: F:\Bangumi暂存\异人旅馆 (2026)\Season 2\a.mp4 -> ("异人旅馆 (2026)", 2)"""
     if not content_path:
         return None, None
     parts = os.path.normpath(content_path).split(os.sep)
@@ -832,33 +900,165 @@ def tmdb_season_episode_counts(library_root, folder_name):
     return result
 
 
-def align_season_to_tmdb(library_root, folder_name, season, fn, src_size=None):
+def _cjk_runs(s):
+    """提取字符串中的连续中日韩文字片段(长度>=2), 用于季名的中文片段比对"""
+    return [r for r in re.findall(r"[\u3040-\u30ff\u3400-\u9fff]{2,}", s or "")]
+
+
+def tmdb_season_names(library_root, folder_name):
+    """查询 Emby 中该剧各 TMDB 季的季名, 返回 {季号: 季名}; 失败返回 None(带缓存)。
+    季名是判定"这个新季属于 TMDB 哪一季"的关键(如 JOJO 的 Season 6 名为「飙马野郎篇」)。"""
+    ckey = os.path.normcase(os.path.normpath(os.path.join(library_root, folder_name)))
+    cache = _TMDB_SEASON_CACHE.setdefault("#seasonnames", {})
+    if ckey in cache:
+        return cache[ckey]
+    result = None
+    sid = _emby_series_id(library_root, folder_name)
+    if sid:
+        try:
+            req = urllib.request.Request(
+                EMBY_HOST.rstrip("/") + "/emby/Items"
+                + f"?ParentId={sid}&Recursive=true&IncludeItemTypes=Season"
+                + "&Fields=IndexNumber&api_key=" + EMBY_API_KEY)
+            with urllib.request.urlopen(req, timeout=20) as r:
+                seasons = json.loads(r.read().decode("utf-8")).get("Items", [])
+            result = {s.get("IndexNumber"): (s.get("Name") or "")
+                      for s in seasons if isinstance(s.get("IndexNumber"), int)}
+            if result:
+                log(f"TMDB 各季名称(经 Emby): {folder_name} -> "
+                    + str({k: result[k] for k in sorted(result)}))
+        except Exception as e:
+            log(f"查询 TMDB 季名失败({folder_name}): {type(e).__name__} {e}", "WARN")
+    cache[ckey] = result
+    return result
+
+
+def pick_season_by_name(library_root, folder_name, hints, exclude=None):
+    r"""按季名文本匹配确定"这一季属于 TMDB 哪一季"。
+
+    hints 为候选标题集合(改名标题/ani-rss 名/Bangumi 规范名)。评分规则:
+      * CJK 片段包含(取最长命中片段长度, 如「飙马野郎」⊂「飙马野郎篇」= 4 分)
+      * 归一化整体相似度 >= 0.6 记 3 分
+    仅当最高分 >= 3 且**唯一最高**时返回该季号, 否则返回 None(不猜)。"""
+    names = tmdb_season_names(library_root, folder_name)
+    if not names:
+        return None
+    hints = [h for h in (hints or []) if h]
+    if not hints:
+        return None
+    best, best_score, second = None, 0, 0
+    for sn, nm in sorted(names.items()):
+        if sn == exclude:
+            continue
+        nn = _norm_text(nm)
+        score = 0
+        for h in hints:
+            for r in _cjk_runs(h):
+                if r in (nm or ""):
+                    score = max(score, len(r))
+            for r in _cjk_runs(nm):
+                if r in (h or ""):
+                    score = max(score, len(r))
+            if score == 0 and nn and SequenceMatcher(None, _norm_text(h), nn).ratio() >= 0.6:
+                score = 3
+        if score > best_score:
+            best, second, best_score = sn, best_score, score
+        elif score > second:
+            second = score
+    if best is not None and best_score >= 3 and best_score > second:
+        log(f"季归属按 TMDB 季名匹配: Season {best} (季名「{names[best]}」, 得分 {best_score})")
+        return best
+    return None
+
+
+def align_season_to_tmdb(library_root, folder_name, season, fn, src_size=None, abs_ep=None,
+                         name_hints=None):
     r"""按 TMDB 季结构对齐 ani-rss 的 cours 拆季。
 
-    背景: ani-rss 按播出 cours 拆 Season 1/2/3, 但 TMDB 可能把多 cours 合成
-    单季连续编号(实测 2024 版乱马½: ani-rss 拆 S1/S2/S3, TMDB「本篇」单季 36 集)。
-    若文件季号在 TMDB 季列表中不存在、而 Season 1 存在, 则归并到 Season 1
-    (集号不变——TMDB 连续编号时 ani-rss 的集号本就与全集编号一致)。
+    背景: ani-rss 按播出 cours 拆季(Season 1/2/3、乃至「第七季」), 而 TMDB 的季划分
+    未必一致。判定目标季的优先级:
+      ① 单季剧(该剧在 TMDB 只有 Season 1) -> 多 cours 合并到 Season 1;
+      ② **按 TMDB 季名匹配**(如库内 JOJO 主条目 Season 6 名为「飙马野郎篇」, 而新番
+         标题是「飙马野郎 JOJO的奇妙冒险 第一赛段」-> 归入 Season 6);
+      ③ 兜底: ani-rss 季号超出 TMDB 最大季且该季集数能容纳本集 -> 取最大季。
 
-    安全约束: 仅当目标 S01 文件不存在(或同大小)时才归并, 防止集号重排的番
-    (cours 内从 1 重新计数)误覆盖; 无法安全归并时保持原季号并告警。
+    集号改写: 若原始文件名带有绝对集号提示 abs_ep(如 [01_49] 的 49, 对应
+    药屋少女的呢喃 这类 TMDB 单季绝对编号剧), 归并时把 cours 相对集号
+    (S03E01)改写为绝对集号(S01E49); 无提示时集号不变(乱马½ 语义)。
+
+    冲突保护: 归并目标已有其他版本(大小不同)时——有绝对集号提示则仍归并,
+    交由同集号冲突检查路由到冲突备份; 无提示则保持原季号并告警(疑似集号重排)。
     返回 (season, fn)。"""
     if season is None or season <= 1:
         return season, fn
     idx = tmdb_season_layout(library_root, folder_name)
     if not idx or season in idx:
         return season, fn
-    if 1 not in idx:
+
+    m = FINAL_NAME_RE.match(os.path.splitext(fn)[0])
+    cur_ep = int(m.group("ep")) if m and m.group("ep").isdigit() else None
+
+    target, reason = None, ""
+    if len(idx) == 1 and 1 in idx:
+        target, reason = 1, "该剧在 TMDB 仅一季, 多 cours 合并"
+    else:
+        picked = pick_season_by_name(
+            library_root, folder_name,
+            list(name_hints or []) + [folder_name, strip_season_marker(folder_name)],
+            exclude=season)
+        if picked is not None:
+            target, reason = picked, "按 TMDB 季名匹配"
+        else:
+            mx = max(idx)
+            counts = tmdb_season_episode_counts(library_root, folder_name) or {}
+            cand_ep = abs_ep if abs_ep is not None else cur_ep
+            if season > mx and cand_ep is not None and counts.get(mx, 0) >= cand_ep:
+                target, reason = mx, f"ani-rss 季号超出 TMDB 最大季 {mx}, 归入最大季"
+
+    if target is None:
+        log(f"TMDB 季结构 {sorted(idx)} 中无 Season {season}, 且无法确定归属季, "
+            f"保持原季号 ({folder_name})", "WARN")
         return season, fn
-    new_fn = rename_season_in_filename(fn, 1)
-    target = os.path.join(library_root, folder_name, "Season 1", new_fn)
-    if os.path.exists(target) and os.path.isfile(target) \
-            and src_size is not None and os.path.getsize(target) != src_size:
-        log(f"TMDB 无 Season {season} 但 Season 1 中 {new_fn} 已存在且大小不同"
-            f"(疑似集号重排), 保持原季号不入 S1", "WARN")
+
+    new_fn = rename_season_in_filename(fn, target)
+    if abs_ep is not None and cur_ep is not None and abs_ep != cur_ep \
+            and 1 <= abs_ep <= 999:
+        old_fn = fn
+        new_fn = rename_season_in_filename(rename_episode_in_filename(fn, abs_ep), target)
+        log(f"季归并集号改写: {old_fn} -> {new_fn} (原始文件名含绝对集号 {abs_ep})")
+    target_path = os.path.join(library_root, folder_name, f"Season {target}", new_fn)
+    if os.path.exists(target_path) and os.path.isfile(target_path) \
+            and src_size is not None and os.path.getsize(target_path) != src_size:
+        if abs_ep is not None:
+            log(f"TMDB 无 Season {season}, Season {target} 中 {new_fn} 已存在且大小不同"
+                f"(其他版本), 归并后交由同集号冲突检查处理", "WARN")
+            return target, new_fn
+        log(f"TMDB 无 Season {season} 但 Season {target} 中 {new_fn} 已存在且大小不同"
+            f"(疑似集号重排), 保持原季号", "WARN")
         return season, fn
-    log(f"季号按 TMDB 季结构归并: S{season:02d} -> S01 ({folder_name} 在 TMDB 无 Season {season})")
-    return 1, new_fn
+    log(f"季号按 TMDB 季结构归并: S{season:02d} -> S{target:02d} "
+        f"({folder_name} 在 TMDB 无 Season {season}; {reason})")
+    return target, new_fn
+
+
+ABS_HINT_TWO_RE = re.compile(r"[\[(](\d{1,2})[_](\d{1,2})[\])]")
+ABS_HINT_ONE_RE = re.compile(r"[\[(](\d{1,2})[\])]")
+
+
+def extract_abs_episode_hint(basename):
+    r"""从 ani-rss 原始文件名提取"绝对集号"提示(可能为 None)。
+
+    实测: [BeanSub][Kusuriya no Hitorigoto S3][01_49][CHS].mp4 -> 49
+          (cours 相对集号 01 + 绝对全集号 49, TMDB 单季连续编号剧需要 49)
+          [Nekomoe kissaten][Kusuriya no Hitorigoto][49][1080p].mp4 -> 49
+    过滤: 仅认纯数字 token(≤99), 排除 [1080p]/[x264_AAC] 等"""
+    m = ABS_HINT_TWO_RE.search(basename)
+    if m:
+        return int(m.group(2))
+    vals = {int(x) for x in ABS_HINT_ONE_RE.findall(basename)}
+    if len(vals) == 1:
+        return vals.pop()
+    return None
 
 
 def rename_episode_in_filename(fn, new_ep):
@@ -1025,8 +1225,7 @@ def resolve_show_folder_raw(title, season, torrent_name, content_path=None):
     if key in cache:
         folder = cache[key]
         hit = match_existing_folder(strip_season_marker(folder), hint_year=ar_year) or \
-              match_existing_folder(re.sub(r"\s*\((19|20)\d{2}\)\s*$", "", folder).strip(),
-                                    hint_year=ar_year)
+              match_existing_folder(split_folder_year(folder)[0], hint_year=ar_year)
         if hit:
             return hit, "缓存"
         # 缓存指向的目录已不存在(被人工改名/删除): 忽略缓存重新解析
@@ -1050,6 +1249,19 @@ def resolve_show_folder_raw(title, season, torrent_name, content_path=None):
             save_cache(cache)
             log(f"库内已有目录(经 ani-rss 名 {ar_title})匹配: -> {hit[0]}\\{hit[1]}")
             return hit, "库内已有目录(ani-rss名)"
+
+    # ②c 系列名包含匹配: 库内目录名(去季标记)是候选标题的子串 -> 同系列的季
+    #    (如库内「JOJO的奇妙冒险（2012）」vs 候选「飙马野郎 JOJO的奇妙冒险 第一赛段」)
+    for _cand in (title, ar_title):
+        if not _cand:
+            continue
+        hit = match_franchise_folder(_cand, hint_year=ar_year)
+        if hit:
+            cache[key] = hit[1]
+            cache[f"{key}|base"] = strip_season_marker(_cand)
+            save_cache(cache)
+            log(f"库内已有目录(系列名包含匹配): {_cand} -> {hit[0]}\\{hit[1]}")
+            return hit, "库内已有目录(系列包含)"
 
     # ③ Bangumi 解析(原标题失败则繁->简重试) → 规范基础名 → 对齐库内 / 新建
     if USE_BGM_API:
@@ -1094,9 +1306,16 @@ def resolve_show_folder_raw(title, season, torrent_name, content_path=None):
                     base = t2s(base) or (item.get("name") or "").strip()
                     # ③a 对齐库内既有目录(同一部番; 跨版本年份差拒配, 参考该季播出年)
                     hit = match_existing_folder(base, hint_year=ar_year)
+                    if not hit:
+                        # 规范名不等但库内目录名是其子串(如「飙马野郎 JOJO的奇妙冒险
+                        # 第一赛段」⊃「JOJO的奇妙冒险」) -> 同系列的季, 归入主条目
+                        hit = match_franchise_folder(base, hint_year=ar_year)
+                        if hit:
+                            log(f"系列名包含匹配(规范名): {base} -> {hit[0]}\\{hit[1]}")
                     if hit:
                         cache[key] = hit[1]
                         cache[f"{key}|id"] = item.get("id")
+                        cache[f"{key}|base"] = base
                         save_cache(cache)
                         log(f"对齐库内既有目录: 基础名={base} -> {hit[0]}\\{hit[1]} "
                             f"(Bangumi id={item.get('id')}, 查询词={via})")
@@ -1127,6 +1346,7 @@ def resolve_show_folder_raw(title, season, torrent_name, content_path=None):
                     folder = f"{base} ({year})"
                     cache[key] = folder
                     cache[f"{key}|id"] = item.get("id")
+                    cache[f"{key}|base"] = base
                     if tmdb_id:
                         cache[f"{key}|tmdb"] = tmdb_id
                     save_cache(cache)
@@ -1179,8 +1399,219 @@ def archive_one(src_full, library_root, folder_name, season, fn, dry_run=False):
     return "moved"
 
 
+# ------------------------ 主/备组角色识别(ani-rss) ------------------------
+_SUB_ROLES_CACHE = {"ts": 0.0, "by_key": {}}
+
+# 字幕组"发布标签" ↔ "ani-rss 显示名"对照表。
+# ani-rss 的 subgroup/label 用的是**显示名**(如 三明治摆烂组), 而入库文件名里是
+# **发布标签**(如 smzase), 二者文本不同, 不加对照表就无法判定主/备角色。
+# 键为归一化后的任一侧写法, 值统一为归一化后的规范名; 两侧都注册即可互通。
+GROUP_ALIASES = {
+    "smzase": "三明治摆烂组",
+    "三明治": "三明治摆烂组",
+    "nekomoe kissaten": "喵萌奶茶屋",
+    "nekomoekissaten": "喵萌奶茶屋",
+    "sakurato": "桜都字幕组",
+    "sakurato.sub": "桜都字幕组",
+    "lolihouse": "lolihouse",
+    "ani": "ani",
+    "orion origin": "orion origin",
+    "orionorigin": "orion origin",
+    "green tea": "绿茶字幕组",
+    "sweetsub": "sweetsub",
+    "nix-raws": "nix-raws",
+    "nixraws": "nix-raws",
+}
+# 规范名 -> 归一化规范名(反向补全, 使显示名也能映射到同一规范名)
+_GROUP_CANON = {}
+for _a, _b in GROUP_ALIASES.items():
+    _na, _nb = _norm_text(_a), _norm_text(_b)
+    _GROUP_CANON[_na] = _nb
+    _GROUP_CANON[_nb] = _nb
+
+
+def _group_key(tag):
+    """字幕组标签統一化: 别名折叠 + 归一化(繁简/标点/大小写)。无法识别时返回 None"""
+    if not tag:
+        return None
+    t = _norm_text(t2s(str(tag)))
+    if not t:
+        return None
+    return _GROUP_CANON.get(t, t)
+
+
+def _fn_group_tag(fn):
+    """最终命名文件名中的字幕组标签: '<标题> - SxxEyy - <标签>.ext' -> <标签>"""
+    m = FINAL_NAME_RE.match(os.path.splitext(fn)[0])
+    return (m.group("group") or "").strip() if m and m.group("group") else ""
+
+
+def _group_role(tag, roles):
+    """标签在订阅的主/备组中的角色: "main" / "standby" / None(无法识别)"""
+    if not roles or not tag:
+        return None
+    t = _group_key(tag)
+    if not t:
+        return None
+    if roles.get("main") and _group_key(roles["main"]) == t:
+        return "main"
+    for s in roles.get("standby") or []:
+        if s and _group_key(s) == t:
+            return "standby"
+    return None
+
+
+def torrent_group_label(torrent_name):
+    """ani-rss 命名的种子名 '标题 - SxxEyy - 组名' -> 组名(识别失败返回 None)"""
+    m = re.search(r"-\s*S\d{1,2}E\d{1,4}\s*-\s*(?P<g>[^-[\]]+?)\s*$", torrent_name or "")
+    return m.group("g").strip() if m else None
+
+
+def sub_roles(*names):
+    """按候选名(标题/TMDB名等)查订阅的主/备组角色; 缓存 ANIRSS_ROLES_TTL 秒。
+    返回 {"main": 组名, "standby": [标签...]} 或 None(未订阅/查询失败)。
+
+    匹配策略(逐级放宽): 归一化全等 -> 一方包含另一方(ani-rss 常存全名, 文件名多为简称
+    如 '乱世千金' vs '乱世千金倪亚·利斯顿转生为娇弱千金的弑神武人华丽无双录')。
+    多候选命中不同订阅时, 以命中数多/名称更长者为准。"""
+    if not ANIRSS_API_BASE or not ANIRSS_API_KEY:
+        return None   # 未配置 ani-rss: 静默跳过角色识别, 退回通用冲突规则
+    keys = [k for k in (_norm_text(t2s(n)) for n in names if n) if k]
+    if not keys:
+        return None
+    now_ts = time.time()
+    if now_ts - _SUB_ROLES_CACHE["ts"] > ANIRSS_ROLES_TTL:
+        idx = {}
+        try:
+            req = urllib.request.Request(
+                ANIRSS_API_BASE.rstrip("/") + "/api/listAni", data=b"{}",
+                method="POST",
+                headers={"X-Api-Key": ANIRSS_API_KEY,
+                         "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+            items = [it for wk in (data.get("data") or {}).get("weekList") or []
+                     for it in (wk.get("items") or [])]
+            for it in items:
+                entry = {"main": (it.get("subgroup") or "").strip() or None,
+                         "standby": [s.get("label") for s in (it.get("standbyRssList") or [])
+                                     if s.get("label")]}
+                for k in (_norm_text(t2s(it.get("title"))),
+                          _norm_text(t2s(it.get("themoviedbName"))),
+                          _norm_text(t2s(it.get("mikanTitle")))):
+                    if k and k not in idx:
+                        idx[k] = entry
+        except Exception as exc:  # noqa: BLE001
+            log(f"ani-rss 订阅角色获取失败(按无角色处理): {exc}", "WARN")
+        _SUB_ROLES_CACHE.update({"ts": now_ts, "by_key": idx})
+    by_key = _SUB_ROLES_CACHE["by_key"]
+    # 1) 全等
+    for k in keys:
+        if k in by_key:
+            return by_key[k]
+    # 2) 包含匹配(取最长命中, 避免短名误撞到多部番)
+    best, best_score = None, 0
+    for k in keys:
+        for ik, entry in by_key.items():
+            if not ik:
+                continue
+            if k in ik or ik in k:
+                score = min(len(k), len(ik))
+                if score > best_score:
+                    best, best_score = entry, score
+    return best
+
+
+def route_episode_collision(src_full, library_root, folder_name, season, fn,
+                            dry_run=False, roles=None, fallback_group=None):
+    r"""同集号冲突检查: 目标季目录中该集已有**其他命名版本**(其他字幕组等)时,
+    按主/备组角色路由(可从 ani-rss 订阅识别, 识别失败退回通用规则):
+      - 新文件=主组、库内同集=备组  => 主组替换备组(旧整套移入冲突备份), 新文件继续入库
+      - 新文件=备组、库内同集=主组  => 新文件直接丢弃(主组已在库, 备组副本无价值)
+      - 其余(角色不明/同为备组)     => 通用规则: 同大小去重丢弃, 不同大小移入冲突备份
+    绝不让同一集出现两个并存条目污染 Emby。返回 True 表示已处理(调用方跳过 archive_one)。"""
+    season_dir = os.path.join(library_root, folder_name, f"Season {season}")
+    if not os.path.isdir(season_dir):
+        return False
+    m = FINAL_NAME_RE.match(os.path.splitext(fn)[0])
+    if not m or not m.group("ep").isdigit():
+        return False
+    ep = int(m.group("ep"))
+    try:
+        src_size = os.path.getsize(src_full)
+    except OSError:
+        return False
+    olds = []                       # (文件名, 完整路径, 大小, 角色)
+    for old in os.listdir(season_dir):
+        om = FINAL_NAME_RE.match(os.path.splitext(old)[0])
+        if not om or not om.group("ep").isdigit():
+            continue
+        if int(om.group("season")) != season or int(om.group("ep")) != ep:
+            continue
+        if os.path.normcase(old) == os.path.normcase(fn):
+            continue  # 同名场景交由 archive_one 处理
+        old_full = os.path.join(season_dir, old)
+        if not os.path.isfile(old_full):
+            continue
+        olds.append((old, old_full, os.path.getsize(old_full),
+                     _group_role(_fn_group_tag(old), roles)))
+    if not olds:
+        return False
+    new_role = _group_role(_fn_group_tag(fn), roles) \
+        or _group_role(fallback_group, roles)
+
+    # 主组替换备组: 库内同集全部为备组时, 旧整套(视频+nfo+thumb等)移入冲突备份
+    if new_role == "main" and olds and all(r == "standby" for _n, _p, _s, r in olds):
+        bdir = os.path.join(CONFLICT_DIR, now().strftime("%Y%m%d_%H%M%S") + "_主组替换备组")
+        log(f"主组替换备组: 库内同集 {', '.join(n for n, _p, _s, _r in olds)} 为备组,"
+            f" 整套移入冲突备份 {bdir}; 主组文件 {fn} 继续入库", "WARN")
+        if not dry_run:
+            os.makedirs(bdir, exist_ok=True)
+            for _n, old_full, _s, _r in olds:
+                base_old = os.path.splitext(os.path.basename(old_full))[0]
+                for x in os.listdir(season_dir):
+                    if x == os.path.basename(old_full) or \
+                            os.path.splitext(x)[0].startswith(base_old):
+                        try:
+                            shutil.move(os.path.join(season_dir, x),
+                                        os.path.join(bdir, x))
+                        except OSError as exc:  # noqa: BLE001
+                            log(f"主组替换备组: 移动 {x} 失败: {exc}", "WARN")
+        return False   # 交给调用方继续 archive_one
+
+    # 主组已在库: 备组新文件直接丢弃(连同工作区同前缀配套文件)
+    if new_role == "standby" and any(r == "main" for _n, _p, _s, r in olds):
+        keeper = next(n for n, _p, _s, r in olds if r == "main")
+        log(f"主组已在库({keeper}), 备组文件直接丢弃: {fn}", "WARN")
+        if not dry_run:
+            base_new = os.path.splitext(os.path.basename(src_full))[0]
+            wdir = os.path.dirname(src_full)
+            for x in os.listdir(wdir):
+                if x == os.path.basename(src_full) or \
+                        os.path.splitext(x)[0].startswith(base_new):
+                    try:
+                        os.remove(os.path.join(wdir, x))
+                    except OSError as exc:  # noqa: BLE001
+                        log(f"备组丢弃: 删除 {x} 失败: {exc}", "WARN")
+        return True
+
+    # 通用规则(角色不明/同为备组): 同大小去重, 不同大小移入冲突备份
+    old, old_full, old_size, _r = olds[0]
+    if old_size == src_size:
+        log(f"同集号同大小(其他命名版本), 丢弃新文件(去重): {fn} ≈ {old}")
+        if not dry_run:
+            os.remove(src_full)
+        return True
+    bdir = os.path.join(CONFLICT_DIR, now().strftime("%Y%m%d_%H%M%S"))
+    log(f"同集号已有其他版本(大小不同), 新文件移入冲突备份 {bdir}: {fn} (库内保留 {old})", "WARN")
+    if not dry_run:
+        os.makedirs(bdir, exist_ok=True)
+        shutil.move(src_full, os.path.join(bdir, fn))
+    return True
+
+
 def park_unmatched(files, torrent_name, dry_run=False):
-    r"""未匹配到目标文件夹: 文件移入 <暂存目录>\待归档\<任务名>\, 等待重试"""
+    r"""未匹配到目标文件夹: 文件移入 F:\Bangumi暂存\待归档\<任务名>\, 等待重试"""
     udir = os.path.join(UNMATCHED_DIR, safe_subdir(torrent_name))
     log(f"未搜索到匹配的目标文件夹, {len(files)} 个文件保留待归档: {udir}", "WARN")
     if not dry_run:
@@ -1195,9 +1626,9 @@ def park_unmatched(files, torrent_name, dry_run=False):
             shutil.move(full, dst)
 
 
-def move_into_library(workdir, torrent_name, dry_run=False, content_path=None):
+def move_into_library(workdir, torrent_name, dry_run=False, content_path=None, abs_hint_map=None):
     """解析工作区改名后的文件: 匹配到目标文件夹则入库, 否则全部移入待归档。
-    返回 (archived, pending)"""
+    abs_hint_map: {(大小, mtime): 绝对集号}, 由原始文件名提取。返回 (archived, pending)"""
     entries = []
     for root, _dirs, files in os.walk(workdir):
         for fn in files:
@@ -1231,6 +1662,9 @@ def move_into_library(workdir, torrent_name, dry_run=False, content_path=None):
 
     library_root, folder_name, source = hit[0][0], hit[0][1], hit[1]
     log(f"目标文件夹匹配来源: {source} -> {library_root}\\{folder_name}")
+    # 主/备组角色(ani-rss 订阅): 同集冲突时主组可替换备组, 备组遇主组让位
+    _roles = sub_roles(show_title, folder_name)
+    _fallback_group = torrent_group_label(torrent_name)
 
     # ani-rss 依据 TMDB 元数据划分的季号, 优先于改名工具从文件名推断的结果。
     # 季号是"内容属于第几季"的属性, 与最终归入哪个目录无关(对齐既有目录时目录名/年份可能不同)
@@ -1252,13 +1686,23 @@ def move_into_library(workdir, torrent_name, dry_run=False, content_path=None):
             fn = new_fn
             season = ar_season
         # TMDB 单季合并多 cours 时(如 2024 版乱马½), 归并到 TMDB 实际存在的季
+        _hint = (abs_hint_map or {}).get(
+            (os.path.getsize(full), int(os.path.getmtime(full)))) \
+            if os.path.isfile(full) else None
         season, fn = align_season_to_tmdb(
             library_root, folder_name, season, fn,
-            src_size=None if dry_run else os.path.getsize(full))
+            src_size=None if dry_run else os.path.getsize(full), abs_ep=_hint,
+            name_hints=[resolved_name_hint(show_title, season), show_title, torrent_name])
         # ani-rss 跨季连续集号时(如异人旅馆 S02E14), 按 TMDB 每季重排编号对齐
         season, fn = align_episode_to_tmdb(
             library_root, folder_name, season, fn,
             src_size=None if dry_run else os.path.getsize(full))
+        # 同集号已有其他版本时按主/备角色路由(主组替换备组/备组让位/去重/冲突备份)
+        if not dry_run and route_episode_collision(
+                full, library_root, folder_name, season, fn,
+                roles=_roles, fallback_group=_fallback_group):
+            archived += 1  # 已去重/备份, 不再入库
+            continue
         result = archive_one(full, library_root, folder_name, season, fn, dry_run=dry_run)
         if result in ("moved", "conflict", "dup"):
             archived += 1
@@ -1304,16 +1748,21 @@ def retry_pending(dry_run=False):
             continue
         library_root, folder_name = hit[0]
         log(f"[重试] '{show_title}' 匹配成功({hit[1]}) -> {library_root}\\{folder_name}")
+        _roles = sub_roles(show_title, folder_name)
         for full, title, season, fn in entries:
             if title != show_title:
                 log(f"[重试] 标题不一致, 保留待人工处理: {fn}", "WARN")
                 continue
             season, fn = align_season_to_tmdb(
                 library_root, folder_name, season, fn,
-                src_size=None if dry_run else os.path.getsize(full))
+                src_size=None if dry_run else os.path.getsize(full),
+                name_hints=[resolved_name_hint(show_title, season), show_title, sub])
             season, fn = align_episode_to_tmdb(
                 library_root, folder_name, season, fn,
                 src_size=None if dry_run else os.path.getsize(full))
+            if not dry_run and route_episode_collision(
+                    full, library_root, folder_name, season, fn, roles=_roles):
+                continue
             archive_one(full, library_root, folder_name, season, fn, dry_run=dry_run)
         if not dry_run and not os.listdir(sub_dir):
             os.rmdir(sub_dir)
@@ -1371,6 +1820,20 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
         log("任务中无媒体文件(视频/字幕), 仅跳过入库")
         return
 
+    # 改名会丢失原始文件名, 而绝对集号提示([01_49] 的 49)恰在里面。
+    # 以 (大小, mtime) 为键建立映射, 改名后仍可反查(改名不改动大小/mtime)
+    abs_hint_map = {}
+    for full, _rel in media_files:
+        try:
+            h = extract_abs_episode_hint(os.path.basename(full))
+        except Exception:
+            h = None
+        if h is not None:
+            try:
+                abs_hint_map[(os.path.getsize(full), int(os.path.getmtime(full)))] = h
+            except OSError:
+                pass
+
     workdir = os.path.join(WORK_DIR, f"{(hash_id or 'manual')[:12]}_{now().strftime('%H%M%S')}")
     keep_source = dry_run or TRANSFER_MODE == "seed"
     used_copy = move_to_workdir(media_files, workdir, dry_run=dry_run, keep_source=keep_source)
@@ -1403,7 +1866,8 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
             raise RuntimeError("改名工具执行失败, 工作区已保留至: " + faildir + " | " + out[:300].replace("\n", " "))
         log("改名工具执行成功")
 
-        archived, pending = move_into_library(workdir, torrent_name, dry_run=dry_run, content_path=content_path)
+        archived, pending = move_into_library(workdir, torrent_name, dry_run=dry_run,
+                                              content_path=content_path, abs_hint_map=abs_hint_map)
         if archived == 0 and pending > 0:
             log(f"未归档: {pending} 个文件保留在 待归档 目录, 可稍后运行 --retry 重试"
                 + (" [DRY-RUN 未实际移动]" if dry_run else ""), "WARN")
