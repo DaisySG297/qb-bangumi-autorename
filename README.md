@@ -49,8 +49,8 @@ flowchart LR
 - **绝对集号续排**（`ep_offset`）：TMDB 把多期合并成一个超长 Season 时（如 东京复仇者 S1 共 55 集），续作 `E01/E02` 自动续排为 `S01E51/E52`
 - **同名不同版分离**：重制版 vs 旧版（如乱马½ 1989/2024）按年份距离拒配，绝不错归
 - **冲突安全**：任何冲突都不覆盖，旧版本移入 `冲突备份\<时间戳>[_原因]\`
-- **GBK 占位符保护**：文件名含 `½`/`♪`/`☆` 等字符时改名工具（PyInstaller 固化 GBK 输出）会崩溃，自动占位替换后还原
-- **英文点分(scene)发布名支持**：`Now.That.I...Girls.S01E01.1080p....MSubs-ToonsHub.mkv` 这类「无 `[组]` 前缀、组名在结尾、标题点分、集号 `SxxExx` 点分夹中段」的外站发布名，改名工具完全不认 → 改名前**主动预改写**为 `[组] 标题 - SxxEyy.ext`（保留季号）；万一仍失败，再按 qB 任务名预改写重试一次
+- **GBK 占位符保护**：文件名含 `½`/`♪`/`☆` 等字符时旧版改名工具（PyInstaller 固化 GBK 输出）会崩溃，脚本自动占位替换后还原（改名工具 **v1.1** 起已自行把输出流降级为 `errors=replace`，此处保留为双保险）
+- **英文点分(scene)发布名支持**：`Now.That.I...Girls.S01E01.1080p....MSubs-ToonsHub.mkv` 这类「无 `[组]` 前缀、组名在结尾、标题点分、集号 `SxxExx` 点分夹中段」的外站发布名，改名前**主动预改写**为 `[组] 标题 - SxxEyy.ext`（保留季号）；万一仍失败，再按 qB 任务名预改写重试一次（改名工具 **v1.1** 起已原生识别该形态，预改写对旧版工具同样兜得住）
 - **TMDB 反查兜底建目录**：非中文发布名 Bangumi 多半「查不到/置信度不足」→ 用 TMDB 反查，并利用「Emby RemoteSearch 按**查询语种**决定返回名语种」的特性做**中文名二次反查**（英文名→原始语种名→中文名），先对齐库内既有目录，否则新建 `<中文名> (TMDB 首播年)`
 - **标题残留清理**：剔除改名工具拼进标题的发布碎片（`... 01v2AVC - S01E01` → `... - S01E01`）
 - **日志按天分段**：`logs/rename_move_YYYY-MM-DD.log`，文件内再按「一次运行」分段；超 2MB 滚动、超 30 天自动清理
@@ -109,7 +109,7 @@ git clone https://github.com/DaisySG297/qb-bangumi-autorename.git
 pip install zhconv   # 繁简转换（也可放到脚本同目录 _vendor/ 下）
 ```
 
-**自备改名工具**：本项目驱动一个独立的番剧批量改名 CLI（PyInstaller 打包，只扫描其工作目录、执行前从 stdin 读入 `y` 确认），将其路径配置到 `QBR_RENAME_EXE`。该工具见姊妹仓库 [bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)。
+**自备改名工具**：本项目驱动一个独立的番剧批量改名 CLI（PyInstaller 打包，只扫描其工作目录、执行前从 stdin 读入 `y` 确认），将其路径配置到 `QBR_RENAME_EXE`。该工具见姊妹仓库 [bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)，成品 EXE 见 [Releases](https://github.com/DaisySG297/bangumi-rename-for-emby/releases/latest)（`bangumi-rename-v1.1.exe`）。建议使用 **v1.1 及以上**：该版原生支持外站英文点分发布名，并修掉了「工作区混有无法识别的文件时 GBK 打印崩溃、确认后一个文件都没改」的老问题。
 
 ## 配置
 
@@ -178,11 +178,11 @@ python qb_rename_move.py --no-seed  # 本次运行强制不做种（直接移动
 检查配置段层级（qB 5.x 必须是顶层 `[AutoRun]` 段，写进 `[Preferences]` 下会静默失效）和占位符含义（`%L`=分类）。用 WebUI API `setPreferences` 写入并回读验证最可靠。
 
 **改名工具对特殊字符报 `UnicodeEncodeError`？**
-工具以 GBK 打印预览，`½`/`♪` 等超集字符必崩（`PYTHONUTF8` 无效）。本脚本已内置占位符机制自动处理。
+旧版工具以 GBK 打印预览，`½`/`♪` 等超集字符必崩（`PYTHONUTF8` 无效）。本脚本已内置占位符机制自动处理；改名工具 **v1.1** 起也把输出流降级为 `errors=replace`，两版都不会再崩。
 
 **任务失败提示「改名工具无法识别工作区中的任何文件」？**
 原始文件名是工具解析不了的形态，两类都已自动处理：
-- **英文点分(scene)发布名**（`Now.That.I...Girls.S01E01.1080p....MSubs-ToonsHub.mkv`：组名在结尾、标题点分）：改名前就预改写为 `[组] 标题 - SxxEyy.ext`（**季号保留**，工具认 `- S02E05`），可直接识别；
+- **英文点分(scene)发布名**（`Now.That.I...Girls.S01E01.1080p....MSubs-ToonsHub.mkv`：组名在结尾、标题点分）：改名前就预改写为 `[组] 标题 - SxxEyy.ext`（**季号保留**，工具认 `- S02E05`），可直接识别（该形态改名工具 **v1.1** 起也已原生支持）；
 - **其他不可解析形态**：按 qB 任务名预改写为 `[组] 标题 - NN.ext` 后自动重试一次。
 
 若任务里有多个视频文件（无法逐集对号）则不救援，工作区保留在 `_残留待处理\_改名失败_*` 供人工处理。
