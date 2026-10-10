@@ -1033,6 +1033,21 @@ def tmdb_lookup(title, year_hint=None, timeout=25):
         return None, None, None
 
 
+def tmdb_display_name(name, year_hint=None):
+    r"""经 TMDB 取**中文显示名**: Emby 的 RemoteSearch 按查询语种决定返回名语种
+    —— 英文/拉丁查询只回原始语种名(实测 ToonsHub 英文名 -> 回日文原名), 中文/日文
+    查询才回中文名。故非中文查询时用返回名**二次反查**, 两次 tmdbId 一致则采用
+    第二次的中文名。返回 (首播年, tmdbId, 名称) 或 (None, None, None)。"""
+    y, tid, nm = tmdb_lookup(name, year_hint=year_hint)
+    if not (y and nm) or _has_cjk(name):
+        return y, tid, nm
+    y2, tid2, nm2 = tmdb_lookup(nm, year_hint=y)
+    if y2 and nm2 and _has_cjk(nm2) and (not tid or not tid2 or str(tid) == str(tid2)):
+        log(f"TMDB 中文名二次反查: {nm} -> {nm2} (tmdbId={tid2 or tid})")
+        return y2, (tid2 or tid), nm2
+    return y, tid, nm
+
+
 def cn_season_marker(n):
     return f"第{CN_NUM.get(n, n)}季"
 
@@ -1765,6 +1780,34 @@ def resolve_show_folder_raw(title, season, torrent_name, content_path=None):
         except Exception as e:
             log(f"Bangumi API 查询失败: {e}", "WARN")
 
+    # ③c TMDB 兜底: 外站(ToonsHub 等)英文/非中文发布名 —— Bangumi 往往没有中文名
+    #     (或干脆查不到 -> 置信度不足), 但 TMDB 一定认得。仅在**非中文标题**时启用:
+    #     用 TMDB 反查(含中文名二次反查)对齐库内既有目录, 或以中文名新建目录。
+    #     中文标题不走这条路(以 Bangumi 为准), 避免把中文名误建成分叉目录。
+    if USE_TMDB_YEAR and not _has_cjk(title):
+        ty, tid, tname = tmdb_display_name(title, ar_year)
+        if ty and tname:
+            base_t = re.sub(r"[\s!！?？。.·,，]+$", "", str(tname)).strip()
+            if base_t:
+                hit = match_existing_folder(base_t, hint_year=ar_year, season=season) or \
+                      match_franchise_folder(base_t, hint_year=ar_year)
+                if hit:
+                    cache[key] = hit[1]
+                    cache[f"{key}|base"] = base_t
+                    if tid:
+                        cache[f"{key}|tmdb"] = tid
+                    save_cache(cache)
+                    log(f"库内已有目录(TMDB 反查名 {base_t})匹配: -> {hit[0]}\\{hit[1]}")
+                    return hit, "库内已有目录(TMDB反查名)"
+                folder = f"{base_t} ({ty})"
+                cache[key] = folder
+                cache[f"{key}|base"] = base_t
+                if tid:
+                    cache[f"{key}|tmdb"] = tid
+                save_cache(cache)
+                log(f"TMDB 反查新建目录(外站非中文发布名): {folder} (tmdbId={tid})")
+                return (DEFAULT_LIBRARY_DIR, folder), "TMDB 反查(外站发布名)"
+
     # ④ 回退: 沿用 ani-rss 已建立的目录名。注意其年份取自 TMDB 的"该季条目",
     #    同一部番的多季在 TMDB 是独立条目, 年份会漂移(如第二季 2026), 故此处
     #    仅作名称来源, 年份最终由外层 TMDB 首播年校正统一修正。
@@ -1963,11 +2006,112 @@ _TASK_TRAILING_EP_RES = [
 ]
 
 
-def parse_torrent_title_ep(torrent_name):
-    r"""从 qB 任务名解析 (标题, 集号, 字幕组); 无法可靠解析返回 None。
+# --- 英文点分(scene)发布名(v24) ---
+# 实测 ToonsHub 等外站发布名形如:
+#   "Now.That.I.Can.Control.Reality.With.A.Mouse.Cursor.Im.Gonna.Click.Away.On.
+#    The.Girls.S01E01.1080p.UNCENSORED.ADN.WEB-DL.DUAL.AAC2.0.H.264.MSubs-ToonsHub.mkv"
+# 特征: 没有 [组] 前缀(组名在**结尾**)、标题点分、集号 SxxExx 点分夹在中间。
+# 老改名 exe 完全不认这种名字(实测报"未在当前目录及子文件夹中找到可识别的文件"),
+# 必须先还原成工具可识别的 "[组] 标题 - SxxEyy.ext" 形态才能进既有流程。
+_SCENE_EP_TOKEN_RE = re.compile(r"^(?:S(\d{1,2}))?E(\d{1,3})(?:v\d+)?$", re.IGNORECASE)
+_SCENE_TAG_TOKENS = {
+    "1080p", "720p", "2160p", "480p", "4k", "2k", "uhd", "hd", "sd", "web", "webdl",
+    "webrip", "bluray", "bdrip", "bdremux", "bd", "hdtv", "dvdrip", "dvd", "remux",
+    "repack", "proper", "x264", "x265", "h264", "h265", "hevc", "avc", "av1", "vp9",
+    "10bit", "8bit", "hi10p", "aac", "aac2", "ac3", "eac3", "dts", "flac", "opus",
+    "mp3", "dual", "multi", "msub", "msubs", "multisub", "subs", "sub", "chs", "cht",
+    "sc", "tc", "jp", "jpn", "jpsc", "jptc", "chi", "eng", "uncensored", "censored",
+    "adn", "cr", "dsnp", "nf", "amzn", "hulu", "baha", "ova", "oad", "special",
+    "complete", "internal",
+}
+
+
+_SCENE_SIDE_EXTS = {".nfo", ".srt", ".ass", ".ssa", ".sub", ".idx", ".jpg", ".jpeg",
+                    ".png", ".torrent", ".txt"}
+
+# 中日文/全角字符判定(v24: 点分名判定与 TMDB 兜底共用)
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff01-\uff5e]")
+
+
+def _has_cjk(s):
+    return bool(_CJK_RE.search(s or ""))
+
+
+def _scene_base(name):
+    r"""点分名取主干: **仅当**末段后缀是已知媒体/侧车后缀时才剥离, 否则原样返回。
+    坑: scene 名末段常是 '...AAC2.0.H.264.MSubs-ToonsHub', 无脑 splitext 会把
+    '.MSubs-ToonsHub' 当成扩展名丢掉(实测导致组名判不出来)。"""
+    s = str(name).strip()
+    root, ext = os.path.splitext(s)
+    if ext.lower() in VIDEO_EXTS or ext.lower() in SUB_EXTS or ext.lower() in _SCENE_SIDE_EXTS:
+        return root
+    return s
+
+
+def _is_scene_dot_name(name):
+    r"""是否英文点分(scene)发布名: 无空格 + 至少两个点 + 含点分隔的集号段(SxxExx/Exx)。
+    含中日文/全角字符、以 [组] 或 (组) 开头、或以 ' - NN' 结尾的名字一律不算,
+    以免抢走中文名/ani-rss 名的既有解析路径。"""
+    if not name:
+        return False
+    base = _scene_base(name)
+    if not base or " " in base or base.count(".") < 2:
+        return False
+    if base[0] in "[(":
+        return False
+    if _has_cjk(base):
+        return False
+    return bool(re.search(r"(?:^|\.)(?:S\d{1,2})?E\d{1,3}(?:v\d+)?(?:\.|$)",
+                          base, re.IGNORECASE))
+
+
+def _normalize_scene_group(tok):
+    r"""点分名末段 -> 组名: 剥掉前导的技术/来源段
+    ('MSubs-ToonsHub' -> 'ToonsHub'; 'BluRay-Group' -> 'Group')。"""
+    if not tok:
+        return ""
+    segs = re.split(r"[-_]", tok)
+    while len(segs) > 1 and _norm_text(segs[0]).lower() in _SCENE_TAG_TOKENS:
+        segs.pop(0)
+    return "-".join(segs)
+
+
+def parse_scene_dot_name(name):
+    r"""英文点分(scene)发布名 -> (标题, 季号或 None, 集号, 组) 或 None。
+    例: 'Now.That.I.Can...Girls.S01E01.1080p.UNCENSORED.ADN.WEB-DL.DUAL.AAC2.0.
+        H.264.MSubs-ToonsHub'
+        -> ('Now That I Can ... Girls', 1, 1, 'ToonsHub')
+    只认点分隔的 SxxExx/Exx 段, 不认纯数字段(免得把 '264'/'1080' 当集号);
+    组取末段, 末段是纯数字或技术标签(1080p/x264/WEB-DL 等)时视为无组。"""
+    if not _is_scene_dot_name(name):
+        return None
+    base = _scene_base(name)
+    tokens = [t for t in base.split(".") if t]
+    idx = season = ep = None
+    for i, t in enumerate(tokens):
+        mt = _SCENE_EP_TOKEN_RE.match(t)
+        if mt and idx is None:
+            idx, ep = i, int(mt.group(2))
+            season = int(mt.group(1)) if mt.group(1) else None
+    if idx is None or idx == 0 or ep is None or not (1 <= ep <= 999):
+        return None
+    title = " ".join(tokens[:idx]).strip(" -_")
+    if not title:
+        return None
+    last = tokens[-1]
+    if re.fullmatch(r"\d+", last) or _norm_text(last).lower() in _SCENE_TAG_TOKENS:
+        group = ""
+    else:
+        group = _normalize_scene_group(last)
+    return title, season, ep, group
+
+
+def parse_torrent_title(torrent_name):
+    r"""从 qB 任务名解析 (标题, 集号, 字幕组, 季号或 None); 无法可靠解析返回 None。
     集号信号口径(多个候选时不猜):
       * 结尾 " - NN" / " - SxxExx" / "[NN]"(纯数字括号标签, 如 orion 的 [01]);
       * 任务名中段唯一的 "SxxExx"(如 ani-rss 名 "乱马½ - S03E25 - 组");
+      * 英文点分(scene)发布名(如 ToonsHub 的 "...Girls.S01E01.1080p....MSubs-ToonsHub")。
     其余括号标签([1080p]/[H265 AAC] 等)先剔除, 避免截断标题或干扰匹配。"""
     if not torrent_name:
         return None
@@ -1978,6 +2122,11 @@ def parse_torrent_title_ep(torrent_name):
     m0 = re.match(r"^[\[(]([^\])]+)[\])]\s*", base)
     group = m0.group(1).strip() if m0 else ""
     s = base[m0.end():] if m0 else base
+    # ③ 英文点分(scene)发布名: 先于括号标签剔除, 否则标签替换会引入空格而失配
+    sc = parse_scene_dot_name(s.strip())
+    if sc:
+        title, season, ep, sc_group = sc
+        return title, ep, (group or sc_group), season
     # 剔除非纯数字的括号标签(保留可能是集号的 [01])
     for t in {t.strip() for t in re.findall(r"[\[(]([^\])]+)[\])]", s)}:
         if not re.fullmatch(r"\d{1,3}", t):
@@ -1990,49 +2139,87 @@ def parse_torrent_title_ep(torrent_name):
             ep = int(ms[0].group(1))
             title = s[:ms[0].start()].strip(" -–—")
             if title and 1 <= ep <= 999:
-                return title, ep, group
+                return title, ep, group, None
             break
     # ② 中段唯一的 SxxExx
-    ms = list(re.finditer(r"(?:^|\s)S\d{1,2}E(\d{1,3})(?=\s|$)", s, re.IGNORECASE))
+    ms = list(re.finditer(r"(?:^|\s)S(\d{1,2})E(\d{1,3})(?=\s|$)", s, re.IGNORECASE))
     if len(ms) == 1:
-        ep = int(ms[0].group(1))
+        season = int(ms[0].group(1))
+        ep = int(ms[0].group(2))
         title = s[:ms[0].start()].strip(" -–—")
         if title and 1 <= ep <= 999:
-            return title, ep, group
+            return title, ep, group, season
     return None
+
+
+def parse_torrent_title_ep(torrent_name):
+    """兼容旧签名: (标题, 集号, 字幕组) 或 None"""
+    r = parse_torrent_title(torrent_name)
+    return r[:3] if r else None
+
+
+def _workdir_videos(workdir):
+    """工作区内(仅顶层)的视频文件名列表; 读取失败返回空列表"""
+    try:
+        return [f for f in os.listdir(workdir)
+                if os.path.isfile(os.path.join(workdir, f))
+                and os.path.splitext(f)[1].lower() in VIDEO_EXTS]
+    except OSError:
+        return []
+
+
+def _rewrite_to_tool_name(workdir, src_name, title, season, ep, group, why):
+    """把工作区里的 src_name 改写成改名工具可识别的 '[组] 标题 - SxxEyy.ext'。
+    季号已知(来自 SxxExx)时保留季号, 否则写 ' - NN' 由工具自行定季。
+    成功返回 1; 无需改写(同名)/目标已存在/改名失败返回 0。"""
+    ext = os.path.splitext(src_name)[1] or ".mkv"
+    tag = f"S{season:02d}E{ep:02d}" if season else f"{ep:02d}"
+    name = f"{title} - {tag}{ext}" if not group else f"[{group}] {title} - {tag}{ext}"
+    name = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
+    src = os.path.join(workdir, src_name)
+    dst = os.path.join(workdir, name)
+    if os.path.abspath(dst) == os.path.abspath(src) or os.path.exists(dst):
+        return 0
+    try:
+        os.rename(src, dst)
+    except OSError as e:
+        log(f"预改写失败({src_name} -> {name}): {e}", "WARN")
+        return 0
+    log(f"{why}: {src_name} -> {name}")
+    return 1
+
+
+def rewrite_scene_name_for_tool(workdir, torrent_name=None):
+    r"""改名前预处理(v24): 工作区内**唯一**视频文件若是英文点分(scene)发布名,
+    提前改写为工具可识别形态(返回 1), 免得白跑一次注定失败的 exe 调用。
+    多文件任务无法逐集对号, 不动(返回 0); 非点分名返回 0。
+    只看文件自身名字 —— 不用 qB 任务名兜底, 免得把无关文件按任务名改写
+    (文件自身不可解析时, 交给改后的 rescue_rename_from_task 兜底)。
+    torrent_name 参数仅为调用方语义保留。"""
+    videos = _workdir_videos(workdir)
+    if len(videos) != 1:
+        return 0
+    parsed = parse_scene_dot_name(videos[0])
+    if not parsed:
+        return 0
+    title, season, ep, group = parsed
+    return _rewrite_to_tool_name(workdir, videos[0], title, season, ep, group,
+                                 "英文点分名(改名工具不识别)已预改写")
 
 
 def rescue_rename_from_task(workdir, torrent_name):
     r"""改名工具兜底: 工作区内**唯一**视频文件解析不了时, 按 qB 任务名
-    构造工具可识别的 '[组] 标题 - NN.ext' 友好名预改写(返回 1)。
+    构造工具可识别的 '[组] 标题 - SxxEyy.ext' 友好名预改写(返回 1)。
     多文件任务无法逐集对号, 不动(返回 0); 任务名解析失败返回 0。"""
-    try:
-        videos = [f for f in os.listdir(workdir)
-                  if os.path.isfile(os.path.join(workdir, f))
-                  and os.path.splitext(f)[1].lower() in VIDEO_EXTS]
-    except OSError:
-        return 0
+    videos = _workdir_videos(workdir)
     if len(videos) != 1:
         return 0
-    parsed = parse_torrent_title_ep(torrent_name)
+    parsed = parse_torrent_title(torrent_name)
     if not parsed:
         return 0
-    title, ep, group = parsed
-    ext = os.path.splitext(videos[0])[1] or ".mkv"
-    name = f"{title} - {ep:02d}{ext}" if not group else f"[{group}] {title} - {ep:02d}{ext}"
-    name = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
-    dst = os.path.join(workdir, name)
-    if os.path.abspath(dst) == os.path.abspath(os.path.join(workdir, videos[0])):
-        return 0
-    if os.path.exists(dst):
-        return 0
-    try:
-        os.rename(os.path.join(workdir, videos[0]), dst)
-    except OSError as e:
-        log(f"兜底预改写失败({videos[0]} -> {name}): {e}", "WARN")
-        return 0
-    log(f"改名工具无法识别原始名, 已按任务名预改写: {videos[0]} -> {name}")
-    return 1
+    title, ep, group, season = parsed
+    return _rewrite_to_tool_name(workdir, videos[0], title, season, ep, group,
+                                 "改名工具无法识别原始名, 已按任务名预改写")
 
 # 字幕组"发布标签" ↔ "ani-rss 显示名"对照表。
 # ani-rss 的 subgroup/label 用的是**显示名**(如 三明治摆烂组), 而入库文件名里是
@@ -2053,6 +2240,11 @@ GROUP_ALIASES = {
     "sweetsub": "sweetsub",
     "nix-raws": "nix-raws",
     "nixraws": "nix-raws",
+    # v24: 外站(ToonsHub)点分发布名的组标签形态。其发布名以 "MSubs-ToonsHub"
+    # 结尾, 而库内同源文件写作 "<标题> - SxxEyy - ToonsHub" —— 归一到同一身份,
+    # 使「同组新版」裁决与主/备角色判定对同一发布组前后一致。
+    "toonshub": "toonshub",
+    "msubstoonshub": "toonshub",
 }
 # 规范名 -> 归一化规范名(反向补全, 使显示名也能映射到同一规范名)
 _GROUP_CANON = {}
@@ -2632,6 +2824,9 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
     staged_dirs = list({os.path.dirname(full) for full, _rel in media_files})
 
     try:
+        # 英文点分(scene)发布名(ToonsHub 等)改名工具完全不认 -> 先还原成
+        # "[组] 标题 - SxxEyy.ext" 形态, 免得白跑一次注定失败的 exe 调用(v24)
+        rewrite_scene_name_for_tool(workdir, torrent_name)
         # 改名工具以 GBK 打印输出, 文件名含超集字符(½/♪/☆ 等)会使其崩溃:
         # 先替换为占位符, 工具跑完(无论成败)立即还原
         n_sub = sanitize_workdir_for_tool(workdir)
