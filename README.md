@@ -52,7 +52,7 @@ flowchart LR
 - **GBK 占位符保护**：文件名含 `½`/`♪`/`☆` 等字符时旧版改名工具（PyInstaller 固化 GBK 输出）会崩溃，脚本自动占位替换后还原（改名工具 **v1.1** 起已自行把输出流降级为 `errors=replace`，此处保留为双保险）
 - **英文点分(scene)发布名支持**：`Now.That.I...Girls.S01E01.1080p....MSubs-ToonsHub.mkv` 这类「无 `[组]` 前缀、组名在结尾、标题点分、集号 `SxxExx` 点分夹中段」的外站发布名，改名前**主动预改写**为 `[组] 标题 - SxxEyy.ext`（保留季号）；万一仍失败，再按 qB 任务名预改写重试一次（改名工具 **v1.1** 起已原生识别该形态，预改写对旧版工具同样兜得住）
 - **TMDB 反查兜底建目录**：非中文发布名 Bangumi 多半「查不到/置信度不足」→ 用 TMDB 反查，并利用「Emby RemoteSearch 按**查询语种**决定返回名语种」的特性做**中文名二次反查**（英文名→原始语种名→中文名），先对齐库内既有目录，否则新建 `<中文名> (TMDB 首播年)`
-- **标题残留清理**：剔除改名工具拼进标题的发布碎片（`... 01v2AVC - S01E01` → `... - S01E01`）
+- **标题残留清理**：剔除改名工具拼进标题的发布碎片（`... 01v2AVC - S01E01` → `... - S01E01`）。根因（`[01v2]` 这类**带版本号的方括号集数**不被识别）已由改名工具 **v1.2** 从源头修复，此处保留为旧版工具的兜底
 - **日志按天分段**：`logs/rename_move_YYYY-MM-DD.log`，文件内再按「一次运行」分段；超 2MB 滚动、超 30 天自动清理
 - **钉钉通知（可选）**：每次运行汇总为**一条**卡片（成功/跳过/失败/重试 + WARN/ERROR 明细），支持加签
 - **失败安全**：改名工具失败 → 整个工作区保留现场；全程日志 + `failures.jsonl`
@@ -109,7 +109,10 @@ git clone https://github.com/DaisySG297/qb-bangumi-autorename.git
 pip install zhconv   # 繁简转换（也可放到脚本同目录 _vendor/ 下）
 ```
 
-**自备改名工具**：本项目驱动一个独立的番剧批量改名 CLI（PyInstaller 打包，只扫描其工作目录、执行前从 stdin 读入 `y` 确认），将其路径配置到 `QBR_RENAME_EXE`。该工具见姊妹仓库 [bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)，成品 EXE 见 [Releases](https://github.com/DaisySG297/bangumi-rename-for-emby/releases/latest)（`bangumi-rename-v1.1.exe`）。建议使用 **v1.1 及以上**：该版原生支持外站英文点分发布名，并修掉了「工作区混有无法识别的文件时 GBK 打印崩溃、确认后一个文件都没改」的老问题。
+**自备改名工具**：本项目驱动一个独立的番剧批量改名 CLI（PyInstaller 打包，只扫描其工作目录、执行前从 stdin 读入 `y` 确认），将其路径配置到 `QBR_RENAME_EXE`。该工具见姊妹仓库 [bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)，成品 EXE 见 [Releases](https://github.com/DaisySG297/bangumi-rename-for-emby/releases/latest)（`bangumi-rename-v1.2.exe` / 界面版 `bangumi-rename-v1.2-gui.exe`）。建议使用 **v1.2 及以上**：
+
+- **v1.1**：原生支持外站英文点分（scene）发布名；输出流降级为 `errors=replace`，修掉「工作区混有无法识别的文件时 GBK 打印崩溃、确认后一个文件都没改」的老问题；
+- **v1.2**：修复**带版本号的方括号集数 `[01v2]` 不被识别**的解析 bug——`[Sakurato] …Yubiwa [01v2][AVC-8bit 1080P AAC][CHS].mp4` 曾被命名成 `…01v2AVC - S01E08 - Sakurato.mp4`（集号被 `[AVC-8bit]` 里的 `-8` 抢走、标题残留 `01v2AVC`），第 1 集因此以 `S01E08` 错误入库。
 
 ## 配置
 
@@ -187,6 +190,9 @@ python qb_rename_move.py --no-seed  # 本次运行强制不做种（直接移动
 
 若任务里有多个视频文件（无法逐集对号）则不救援，工作区保留在 `_残留待处理\_改名失败_*` 供人工处理。
 
+**集号被改成奇怪的数字（例如明明是第 1 集，却入库成 `S01E08`）？**
+旧版改名工具（**v1.1 及以前**）的解析 bug：源文件 `[Sakurato] …Yubiwa [01v2][AVC-8bit 1080P AAC][CHS].mp4` 的集号 `[01v2]`（方括号 + 版本号）不被识别，工具落到横杠模式后，把 `[AVC-8bit…]` 里的 `-8` 当成了集号，产出 `… 01v2AVC - S01E08 - Sakurato.mp4`（集号错、标题还残留 `01v2AVC`）。脚本侧只能在 **TMDB 对齐**阶段告警（日志 `集号无法对齐 TMDB(… S1: E8, …)`）并按设计**保持原集号**，不会自动纠正，因此这一集会被错误入库、Emby 上表现为一个无元数据的占位分集。处置：升级改名工具到 **v1.2**（源头修复，`[01v2]`/`[05V2]` 直接识别、`8bit`/`1080p`/`x264` 不再被当集号），再把库内文件名改成正确集号、删掉 Emby 造的占位分集 `.nfo`，对剧集条目执行一次 `Refresh` 即可恢复。
+
 **英文标题的番搜不到目标目录、进了 `待归档\`？**
 点分名发布的标题通常是**英文**，Bangumi 侧容易「有结果但置信度不足」。脚本用 TMDB 反查兜底：先按英文名查一次（TMDB 对英文查询返回**原始语种名**），再用该名查第二次拿**中文名**，然后对齐库内既有目录或新建 `<中文名> (<TMDB 首播年>)`。若该番属于另一个媒体库（如 NSFW 库），在那个库内**预建同名目录**（可放含 `<tmdbid>` 的 `tvshow.nfo`）即可——脚本会自动对齐过去，而不是新建分叉目录。
 
@@ -194,6 +200,8 @@ python qb_rename_move.py --no-seed  # 本次运行强制不做种（直接移动
 在 `SEASON_OVERRIDES` 加一条：`{"show": [...], "file": [...], "season": N}`；若该季在 TMDB 上续排在超长 Season 里（如第 4 期续排进 S1 第 51 集起），再加 `"ep_offset": 50`。`file` 关键字要能命中原始文件名或 qB 任务名。
 
 ## 更新记录
+
+> 姊妹仓库 [bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)（改名工具本体）当前 **v1.2**：修复 `[01v2]` 带版本号方括号集数不被识别的解析 bug（`[AVC-8bit]` 的 `-8` 曾被当成集号）；**v1.1** 新增外站英文点分（scene）发布名识别、GBK 输出降级与图形界面版。
 
 | 版本 | 变更 |
 |---|---|
