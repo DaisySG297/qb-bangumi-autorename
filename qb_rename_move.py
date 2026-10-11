@@ -1942,17 +1942,31 @@ def season_override_ep_offset(folder_name, orig_texts):
     return int(ov.get("ep_offset") or 0) if ov else 0
 
 
-# qB 任务名(ani-rss 生成)中的集号: "... - S01E01 - <组>"。用于校验改名工具的
-# 集号解析(实测 "[ANi] 新網球王子 U-17 WORLD CUP...- 01" 的 "U-17" 被当成集 17)。
+# qB 任务名(ani-rss 生成)中的集号。用于校验改名工具的集号解析
+# (实测 "[ANi] 新網球王子 U-17 WORLD CUP...- 01" 的 "U-17" 被当成集 17)。
+# 两类形态:
+#   ① E 形态:     "[ANi] 标题 - S01E03 [1080P]" / "[Nix-Raws] 标题 S01E03 [CR WEB-DL...]"
+#   ② 方括号形态: "[桜都字幕组] 标题 [01v2][1080P][简体内嵌]" —— 集号 = 紧贴 [] 的数字
+# 为什么要认方括号形态(2026-10-11 雪女事故): 桜都用 "[01v2]" 标集号, 只认 E 形态时
+# hint=None -> 集号守卫静默跳过; 改名工具(=<v1.1)又把 [AVC-8bit] 里的 -8 当成集号
+# 产出 S01E08, 无人纠正、直接错误入库。方括号规则要求数字**紧贴 "]"**(允许 vN 版本号 /
+# _NN 分卷后缀), 因此 [1080P]/[8bit]/[10bit]/[2160p]/[2024] 等技术/年份标签不会命中。
 _TASK_EP_RE = re.compile(r"(?:^|[ \-\[])(?:S\d{1,2})?E(\d{1,3})(?:[ \-\]]|$)", re.IGNORECASE)
+_TASK_EP_BRACKET_RE = re.compile(r"\[(\d{1,3})(?:[vV]\d+|_\d+)?\]")
 
 
 def task_episode_hint(torrent_name):
-    """从 qB 任务名提取集号提示; 无法可靠提取时返回 None"""
+    """从 qB 任务名提取集号提示; 无法可靠提取时返回 None。
+
+    优先 E 形态(有 E 形态就不看方括号, 免得 "[02]" 之类的分卷/碟号干扰);
+    无 E 形态时回退方括号形态。候选集号必须唯一 —— 出现多个不同数字即视为
+    不可靠返回 None, 守卫宁可不动, 也不误改。
+    """
     if not torrent_name:
         return None
-    ms = _TASK_EP_RE.findall(torrent_name)
-    return int(ms[-1]) if len(ms) == 1 else None
+    ms = _TASK_EP_RE.findall(torrent_name) or _TASK_EP_BRACKET_RE.findall(torrent_name)
+    nums = {int(x) for x in ms}
+    return nums.pop() if len(nums) == 1 else None
 
 
 _TITLE_JUNK_RE = re.compile(r"\s+\d{1,4}v\d+[A-Za-z0-9]*(?= - S\d{1,2}E\d{1,4})")
@@ -1979,7 +1993,7 @@ def apply_task_episode_guard(full, fn, torrent_name, dry_run=False):
     old_fn = fn
     fn = rename_episode_in_filename(fn, hint)
     log(f"集号按 qB 任务名(E{hint:02d}) 校正: {old_fn} -> {fn} "
-        f"(任务名集号权威, 防标题内数字如 U-17 被误当集号)", "WARN")
+        f"(任务名集号权威; 防标题/技法参数里的数字被误当集号)", "WARN")
     if not dry_run and fn != old_fn:
         try:
             new_full = os.path.join(os.path.dirname(full), fn)
@@ -2602,6 +2616,8 @@ def move_into_library(workdir, torrent_name, dry_run=False, content_path=None, a
         # 集号守卫: 单文件任务时 qB 任务名(ani-rss 按 TMDB 生成)的集号权威。
         # 实测 "[ANi] 新網球王子 U-17 WORLD CUP...- 01" 的 "U-17" 被改名工具
         # 误当集号(S01E17), 任务名说是 E01 -> 以任务名为准。
+        # 任务名集号有两种形态: E 形态("... S01E03 ...")与方括号形态("[01v2]"),
+        # 见 task_episode_hint(方括号形态为 2026-10-11 雪女事故后补上)。
         if len(recognized) == 1:
             full, fn = apply_task_episode_guard(full, fn, torrent_name, dry_run=dry_run)
         if ar_season is not None and ar_season != season:
