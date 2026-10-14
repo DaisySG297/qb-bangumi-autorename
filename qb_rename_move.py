@@ -178,27 +178,6 @@ TMDB_YEAR_TOLERANCE = 1     # 库内目录年份与 TMDB 首播年相差 > 该�
 # ani-rss 目录年份=该季播出年, 与既有目录(第一季/旧版)年份差超过该值时不视为同一部,
 # 不并入既有目录(否则重制版内容会错进旧版目录, Emby 无法匹配分集元数据)。
 YEAR_SPLIT_GAP = 5
-# 独立新条目型续作的季结构纠正(实测 2026-10-14 魔法少女育成计划 restart):
-# ani-rss 按"第2期"给 Season 2, 但 TMDB 把它建成**独立新条目**(337277, 2026),
-# 该条目自身只有 Season 1 -> 本地 Season 2 的 Emby 分集拿不到任何元数据。
-# 判别信号: Emby 季条目"存在但完全无 provider 元数据"(无 PremiereDate/ProviderIds)
-# —— 真实 TMDB 季必带这两者(归还者 S2 / 侦探已死 S1/S2 实测)。判中则归并到 Season 1
-# 并迁移该季既有文件。若某次误判, 置 False 可完全关闭该纠正。
-TMDB_ECHO_GUARD = True
-# TMDB 官网季列表(权威季结构来源, 2026-10-14 打通):
-# Emby 的季列表只是**本地目录回声**, 无法回答"TMDB 有没有这一季"; 而 TMDB 官网
-# /tv/{id}/seasons 页面直接列出全部季(实测 337277->[1] / 230050->[1,2] /
-# 117061->[0,1,2]), 作为权威依据优先于 Emby 回声。请求要点: **不带浏览器 UA**
-# (伪装浏览器会触发 Cloudflare 挑战 403 "Just a moment...", 不带 UA 反而 200)。
-# 结果按 TMDB id 落盘缓存(见 logs/tmdb_web_seasons_cache.json)。
-TMDB_WEB_SEASONS = True
-TMDB_WEB_SEASON_TTL_DAYS = 3        # 官网季列表缓存有效期(季结构变化很慢)
-# 可选: TMDB v3 API Key(免费申请: https://www.themoviedb.org/settings/api)。
-# 填写后季列表优先走官方 API(结构化 JSON); 为空则解析官网页面(实测可用, 无需密钥)。
-# 注意: API 无密钥时返回 401 "Invalid API key" —— 这是**鉴权失败而非网络封锁**,
-# 本机到 api.themoviedb.org 的连通性正常。
-# ⚠ 密钥只从环境变量读取, 切勿写死在文件里。
-TMDB_API_KEY = _env("QBR_TMDB_APIKEY", "")
 
 VIDEO_EXTS = {".mp4", ".mkv", ".m4v", ".avi", ".mov", ".wmv", ".flv", ".rmvb", ".ts", ".m2ts"}
 SUB_EXTS = {".ass", ".srt", ".ssa", ".vtt", ".sup", ".mks"}
@@ -212,6 +191,7 @@ YEAR_RE = re.compile(r"(19|20)\d{2}")
 CN_NUM = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九", 10: "十",
           11: "十一", 12: "十二"}
 TZ8 = timezone(timedelta(hours=8))
+# ==================================================================
 # ==================================================================
 
 
@@ -2330,21 +2310,31 @@ def season_override_ep_offset(folder_name, orig_texts):
 # hint=None -> 集号守卫静默跳过; 改名工具(=<v1.1)又把 [AVC-8bit] 里的 -8 当成集号
 # 产出 S01E08, 无人纠正、直接错误入库。方括号规则要求数字**紧贴 "]"**(允许 vN 版本号 /
 # _NN 分卷后缀), 因此 [1080P]/[8bit]/[10bit]/[2160p]/[2024] 等技术/年份标签不会命中。
+#   ③ 独立横杠形态: "[ANi] 标题 - 03 [1080P][Baha]..." —— ANi 系任务名标集号的方式。
+# 为什么要认横杠形态(2026-10-15 网球王子事故): 改名工具把标题「U-17」里的 17 当成
+# 集号产出 S01E17, 若 hint 能从任务名给出 3, 守卫当场就能纠回 E03。横杠前必须是
+# 行首或空白(用环视不消耗字符), 因此标题内紧贴字母的连字编号(U-17、EX-2)不会命中;
+# 数字后必须是空白/"["/行尾, 因此 -2nd、-1080P 之类不会命中。
 _TASK_EP_RE = re.compile(r"(?:^|[ \-\[])(?:S\d{1,2})?E(\d{1,3})(?:[ \-\]]|$)", re.IGNORECASE)
 _TASK_EP_BRACKET_RE = re.compile(r"\[(\d{1,3})(?:[vV]\d+|_\d+)?\]")
+_TASK_EP_DASH_RE = re.compile(r"(?:^|(?<=\s))-\s*(\d{1,3})(?:[vV]\d+)?(?=\s|\[|$)")
 
 
 def task_episode_hint(torrent_name):
     """从 qB 任务名提取集号提示; 无法可靠提取时返回 None。
 
-    优先 E 形态(有 E 形态就不看方括号, 免得 "[02]" 之类的分卷/碟号干扰);
-    无 E 形态时回退方括号形态。候选集号必须唯一 —— 出现多个不同数字即视为
-    不可靠返回 None, 守卫宁可不动, 也不误改。
+    优先 E 形态(有 E 形态就只看 E 形态, 免得 "[02]" 之类的分卷/碟号干扰);
+    无 E 形态时合并「独立横杠」与「方括号」两类候选。候选集号必须唯一 ——
+    出现多个不同数字即视为不可靠返回 None, 守卫宁可不动, 也不误改。
     """
     if not torrent_name:
         return None
-    ms = _TASK_EP_RE.findall(torrent_name) or _TASK_EP_BRACKET_RE.findall(torrent_name)
-    nums = {int(x) for x in ms}
+    ms = _TASK_EP_RE.findall(torrent_name)
+    if ms:
+        nums = {int(x) for x in ms}
+        return nums.pop() if len(nums) == 1 else None
+    nums = {int(x) for x in
+            _TASK_EP_DASH_RE.findall(torrent_name) + _TASK_EP_BRACKET_RE.findall(torrent_name)}
     return nums.pop() if len(nums) == 1 else None
 
 

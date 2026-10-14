@@ -123,10 +123,11 @@ git clone https://github.com/DaisySG297/qb-bangumi-autorename.git
 pip install zhconv   # 繁简转换（也可放到脚本同目录 _vendor/ 下）
 ```
 
-**自备改名工具**：本项目驱动一个独立的番剧批量改名 CLI（PyInstaller 打包，只扫描其工作目录、执行前从 stdin 读入 `y` 确认），将其路径配置到 `QBR_RENAME_EXE`。该工具见姊妹仓库 [bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)，成品 EXE 见 [Releases](https://github.com/DaisySG297/bangumi-rename-for-emby/releases/latest)（`bangumi-rename-v1.2.exe` / 界面版 `bangumi-rename-v1.2-gui.exe`）。建议使用 **v1.2 及以上**：
+**自备改名工具**：本项目驱动一个独立的番剧批量改名 CLI（PyInstaller 打包，只扫描其工作目录、执行前从 stdin 读入 `y` 确认），将其路径配置到 `QBR_RENAME_EXE`。该工具见姊妹仓库 [bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)，成品 EXE 见 [Releases](https://github.com/DaisySG297/bangumi-rename-for-emby/releases/latest)（`bangumi-rename-v1.3.exe` / 界面版 `bangumi-rename-v1.3-gui.exe`）。建议使用 **v1.3 及以上**：
 
 - **v1.1**：原生支持外站英文点分（scene）发布名；输出流降级为 `errors=replace`，修掉「工作区混有无法识别的文件时 GBK 打印崩溃、确认后一个文件都没改」的老问题；
 - **v1.2**：修复**带版本号的方括号集数 `[01v2]` 不被识别**的解析 bug——`[Sakurato] …Yubiwa [01v2][AVC-8bit 1080P AAC][CHS].mp4` 曾被命名成 `…01v2AVC - S01E08 - Sakurato.mp4`（集号被 `[AVC-8bit]` 里的 `-8` 抢走、标题残留 `01v2AVC`），第 1 集因此以 `S01E08` 错误入库。
+- **v1.3**：修复**标题内连字编号被当成集号**的解析 bug——`[ANi] 新網球王子 U-17 WORLD CUP … - 03` 的 `U-17` 抢在 ` - 03` 之前命中，产出 `新網球王子 U - S01E17`（集号错、标题截断），E03 曾以 `S03E17` 错误入库。现优先取最后一个「横杠前是空白」的独立集号标记。
 
 ## 配置
 
@@ -210,7 +211,8 @@ python qb_rename_move.py --no-seed  # 本次运行强制不做种（直接移动
 旧版改名工具（**v1.1 及以前**）的解析 bug：源文件 `[Sakurato] …Yubiwa [01v2][AVC-8bit 1080P AAC][CHS].mp4` 的集号 `[01v2]`（方括号 + 版本号）不被识别，工具落到横杠模式后，把 `[AVC-8bit…]` 里的 `-8` 当成了集号，产出 `… 01v2AVC - S01E08 - Sakurato.mp4`（集号错、标题还残留 `01v2AVC`）。现在有**两道防线**：
 
 - **改名工具 v1.2**（源头修复）：方括号模式支持 `[01v2]`/`[05V2]`，横杠模式加 `(?![A-Za-z0-9])` 防误吞，`8bit`/`1080p`/`x264` 不再被当集号；
-- **脚本 v25 集号守卫**：任务名集号现在也认**方括号形态**（`[01v2]` → E01），即便仍在用旧版工具，也会自动把 `S01E08` 纠回 `S01E01` 并留一条 `集号按 qB 任务名(E01) 校正` 的 WARN。
+- **改名工具 v1.3**（源头修复第二例）：标题内连字编号 `U-17` 的 `-17` 不再抢在独立集号 ` - 03` 之前命中；
+- **脚本 v25~v27 集号守卫**：任务名集号认**方括号形态**（`[01v2]` → E01）与**独立横杠形态**（`- 03` → E03），即便仍在用旧版工具，也会自动纠回正确集号并留一条 `集号按 qB 任务名(Exx) 校正` 的 WARN。
 
 若历史文件已经以错误集号入库，把库内文件名改成正确集号、删掉 Emby 造的占位分集 `.nfo`，再对剧集条目执行一次 `Refresh` 即可恢复。
 
@@ -231,11 +233,12 @@ Emby 展示的剧名来自 TMDB 元数据，而 Bangumi 与 TMDB 的译名可能
 
 ## 更新记录
 
-> 姊妹仓库 [bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)（改名工具本体）当前 **v1.2**：修复 `[01v2]` 带版本号方括号集数不被识别的解析 bug（`[AVC-8bit]` 的 `-8` 曾被当成集号）；**v1.1** 新增外站英文点分（scene）发布名识别、GBK 输出降级与图形界面版。
+> 姊妹仓库 [bangumi-rename-for-emby](https://github.com/DaisySG297/bangumi-rename-for-emby)（改名工具本体）当前 **v1.3**：修复标题内连字编号（U-17）被当成集号、标题截断的解析 bug；**v1.2** 修复 `[01v2]` 带版本号方括号集数不被识别（`[AVC-8bit]` 的 `-8` 曾被当成集号）；**v1.1** 新增外站英文点分（scene）发布名识别、GBK 输出降级与图形界面版。
 
 | 版本 | 变更 |
 |---|---|
 | v26 | **TMDB 数据源打通 + 季结构回声纠正 + 目录名/集号对齐**：①季结构判定改用 **TMDB 官方数据**（可选 `QBR_TMDB_APIKEY` 走官方 API，未配则解析官网 `/tv/<id>/seasons` 页面），优先级 **TMDB > Emby 回声**，并顺带修掉旧隐患「库内只有 S1 时把真 S2 强行并入 S1」；②**本地回声保护**——Emby 季列表只是本地目录回声，新条目型续作（TMDB 独立条目自身仅 S1）自动归并回 `Season 1` 并把该季既有文件一并迁移（开关 `TMDB_ECHO_GUARD`，判据：季条目「存在却无 `PremiereDate`/`ProviderIds`」+ 创建 ≥ 2h 竞态防护）；③新建目录基础名优先取 **TMDB 规范名**（与 Emby 显示名同源），目录名不再与 Emby 条目名不一致；④`ep_offset` **支持负值**（跨季绝对编号回排，如 `E13` → `S02E01`），条目可省略 `season` 只做集号偏移 |
+| v27 | **集号守卫认独立横杠形态任务名**：`[ANi] 标题 - 03 [1080P]` 这类集号此前同样提取不到，守卫静默跳过 → 改名工具把标题内连字编号 `U-17` 的 17 当成集号时无人纠正（网球王子 E03 曾以 `S03E17` 入库）。现补 ` - NN` 形态（**横杠前必须是行首/空白**，故标题内 `U-17`、`EX-2` 不会误命中；数字后须是空白/`[`/行尾，故 `-2nd`、`-1080P` 不会命中），横杠与方括号候选合并后仍要求**唯一**，宁可不动也不误改 |
 | v25 | **集号守卫认方括号形态任务名**：`[桜都字幕组] … [01v2][1080P][简体内嵌]` 这类集号此前提取不到（正则只认 `- S01E01`/`E01`），守卫静默跳过 → 改名工具把集号解错时无人纠正（雪女番 E01 曾以 `S01E08` 入库）。现补 `[NN]`/`[NNvX]`/`[NN_MM]` 识别（数字须紧贴 `]`，故 `[1080P]`/`[8bit]`/`[2024]` 等技术/年份标签不会误命中），且**优先 E 形态、候选集号必须唯一**，宁可不动也不误改 |
 | v24 | **外站英文点分(scene)发布名全链路支持**：`parse_scene_dot_name` 解析点分名（组名在结尾 / 标题点分 / `SxxExx` 夹中段，`MSubs-ToonsHub`→`ToonsHub`）+ 改名前**主动预改写**（保留季号）+ 目录匹配新增 **TMDB 反查兜底**（中文名二次反查） |
 | v23 | **改名工具兜底救援**（英文点分名自动预改写重试）+ **`ep_offset` 绝对集号续排**（续作并入 TMDB 合并单季，东京复仇者 三天战争篇案例） |
