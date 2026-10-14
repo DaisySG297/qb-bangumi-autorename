@@ -178,6 +178,27 @@ TMDB_YEAR_TOLERANCE = 1     # 库内目录年份与 TMDB 首播年相差 > 该�
 # ani-rss 目录年份=该季播出年, 与既有目录(第一季/旧版)年份差超过该值时不视为同一部,
 # 不并入既有目录(否则重制版内容会错进旧版目录, Emby 无法匹配分集元数据)。
 YEAR_SPLIT_GAP = 5
+# 独立新条目型续作的季结构纠正(实测 2026-10-14 魔法少女育成计划 restart):
+# ani-rss 按"第2期"给 Season 2, 但 TMDB 把它建成**独立新条目**(337277, 2026),
+# 该条目自身只有 Season 1 -> 本地 Season 2 的 Emby 分集拿不到任何元数据。
+# 判别信号: Emby 季条目"存在但完全无 provider 元数据"(无 PremiereDate/ProviderIds)
+# —— 真实 TMDB 季必带这两者(归还者 S2 / 侦探已死 S1/S2 实测)。判中则归并到 Season 1
+# 并迁移该季既有文件。若某次误判, 置 False 可完全关闭该纠正。
+TMDB_ECHO_GUARD = True
+# TMDB 官网季列表(权威季结构来源, 2026-10-14 打通):
+# Emby 的季列表只是**本地目录回声**, 无法回答"TMDB 有没有这一季"; 而 TMDB 官网
+# /tv/{id}/seasons 页面直接列出全部季(实测 337277->[1] / 230050->[1,2] /
+# 117061->[0,1,2]), 作为权威依据优先于 Emby 回声。请求要点: **不带浏览器 UA**
+# (伪装浏览器会触发 Cloudflare 挑战 403 "Just a moment...", 不带 UA 反而 200)。
+# 结果按 TMDB id 落盘缓存(见 logs/tmdb_web_seasons_cache.json)。
+TMDB_WEB_SEASONS = True
+TMDB_WEB_SEASON_TTL_DAYS = 3        # 官网季列表缓存有效期(季结构变化很慢)
+# 可选: TMDB v3 API Key(免费申请: https://www.themoviedb.org/settings/api)。
+# 填写后季列表优先走官方 API(结构化 JSON); 为空则解析官网页面(实测可用, 无需密钥)。
+# 注意: API 无密钥时返回 401 "Invalid API key" —— 这是**鉴权失败而非网络封锁**,
+# 本机到 api.themoviedb.org 的连通性正常。
+# ⚠ 密钥只从环境变量读取, 切勿写死在文件里。
+TMDB_API_KEY = _env("QBR_TMDB_APIKEY", "")
 
 VIDEO_EXTS = {".mp4", ".mkv", ".m4v", ".avi", ".mov", ".wmv", ".flv", ".rmvb", ".ts", ".m2ts"}
 SUB_EXTS = {".ass", ".srt", ".ssa", ".vtt", ".sup", ".mks"}
@@ -191,7 +212,6 @@ YEAR_RE = re.compile(r"(19|20)\d{2}")
 CN_NUM = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九", 10: "十",
           11: "十一", 12: "十二"}
 TZ8 = timezone(timedelta(hours=8))
-# ==================================================================
 # ==================================================================
 
 
@@ -1174,30 +1194,12 @@ _TMDB_SEASON_CACHE = {}
 
 
 def _emby_series_id(library_root, folder_name):
-    """按目录路径查找 Emby 剧集条目, 返回 Id 或 None(带缓存)"""
-    ckey = os.path.normcase(os.path.normpath(os.path.join(library_root, folder_name)))
-    cache = _TMDB_SEASON_CACHE.setdefault("#series", {})
-    if ckey in cache:
-        return cache[ckey]
-    sid = None
-    if USE_TMDB_YEAR and EMBY_HOST and EMBY_API_KEY:
-        try:
-            want = ckey
-            req = urllib.request.Request(
-                EMBY_HOST.rstrip("/") + "/emby/Items"
-                + "?Recursive=true&IncludeItemTypes=Series&Fields=Path"
-                + "&api_key=" + EMBY_API_KEY)
-            with urllib.request.urlopen(req, timeout=20) as r:
-                items = json.loads(r.read().decode("utf-8")).get("Items", [])
-            for it in items:
-                p = os.path.normcase(os.path.normpath(it.get("Path") or ""))
-                if p and p == want:
-                    sid = it.get("Id")
-                    break
-        except Exception as e:
-            log(f"查找 Emby 剧集条目失败({folder_name}): {type(e).__name__} {e}", "WARN")
-    cache[ckey] = sid
-    return sid
+    """按目录路径查找 Emby 剧集条目, 返回 Id 或 None(带缓存)。
+
+    实现复用 `_emby_series_item`(同一份 Path+ProviderIds 查询结果), 避免同一次运行里
+    对 Emby 的全量剧集列表查询跑两遍。"""
+    item = _emby_series_item(library_root, folder_name)
+    return (item or {}).get("Id")
 
 
 def _existing_season_year(library_root, folder_name, season):
@@ -1225,6 +1227,177 @@ def _existing_season_year(library_root, folder_name, season):
     return None
 
 
+def _emby_series_item(library_root, folder_name):
+    """返回 Emby 中该剧条目(按目录路径精确匹配, 带缓存); 不存在/失败返回 None。"""
+    ckey = os.path.normcase(os.path.normpath(os.path.join(library_root, folder_name)))
+    cache = _TMDB_SEASON_CACHE.setdefault("#seriesitem", {})
+    if ckey in cache:
+        return cache[ckey]
+    item = None
+    if USE_TMDB_YEAR and EMBY_HOST and EMBY_API_KEY:
+        try:
+            req = urllib.request.Request(
+                EMBY_HOST.rstrip("/") + "/emby/Items"
+                + "?Recursive=true&IncludeItemTypes=Series&Fields=Path,ProviderIds"
+                + "&api_key=" + EMBY_API_KEY)
+            with urllib.request.urlopen(req, timeout=20) as r:
+                items = json.loads(r.read().decode("utf-8")).get("Items", [])
+            for it in items:
+                p = os.path.normcase(os.path.normpath(it.get("Path") or ""))
+                if p and p == ckey:
+                    item = it
+                    break
+        except Exception as e:
+            log(f"查找 Emby 剧集条目失败({folder_name}): {type(e).__name__} {e}", "WARN")
+    cache[ckey] = item
+    return item
+
+
+_WEB_SEASON_CACHE = os.path.join(LOG_DIR, "tmdb_web_seasons_cache.json")
+_WEB_SEASON_MEM = {}
+
+
+def _tmdb_web_get(url, timeout=20):
+    r"""TMDB 官网 GET。⚠ 实测(2026-10-14): 伪装浏览器 UA 会触发 Cloudflare 挑战
+    (403 "Just a moment..."), 而**不带 UA / 非浏览器 UA** 反而直通 200;
+    故请求头只用 Accept-Language, 依次尝试 [无 UA, curl UA]。"""
+    last_err = None
+    for ua in (None, "curl/8.5.0"):
+        headers = {"Accept-Language": "zh-CN,zh;q=0.9", "Accept": "text/html,*/*"}
+        if ua:
+            headers["User-Agent"] = ua
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode("utf-8", "ignore")
+        except Exception as e:
+            last_err = e
+    raise last_err if last_err else RuntimeError("unknown error")
+
+
+def _save_web_season_cache(disk, tmdb_id, result):
+    """把季列表写入落盘缓存(失败只告警, 不影响主流程)。"""
+    try:
+        os.makedirs(os.path.dirname(_WEB_SEASON_CACHE), exist_ok=True)
+        disk[tmdb_id] = {"ts": time.time(),
+                         "seasons": {str(k): v for k, v in result.items()}}
+        with open(_WEB_SEASON_CACHE, "w", encoding="utf-8") as f:
+            json.dump(disk, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        log(f"写入 TMDB 季列表缓存失败: {e}", "WARN")
+
+
+def _tmdb_api_seasons(tmdb_id, timeout=20):
+    r"""经 TMDB 官方 API(v3) 取季列表 -> {季号: 季名}; 未配 key/失败返回 None。
+    API 路径在 TMDB_API_KEY 非空时启用, 结构化 JSON 比页面解析稳健。"""
+    if not TMDB_API_KEY:
+        return None
+    try:
+        url = (f"https://api.themoviedb.org/3/tv/{tmdb_id}"
+               f"?api_key={urllib.parse.quote(TMDB_API_KEY)}&language=zh-CN")
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        result = {}
+        for s in data.get("seasons") or []:
+            n = s.get("season_number")
+            if isinstance(n, int):
+                result[n] = s.get("name") or f"第 {n} 季"
+        if not result:
+            log(f"TMDB API 季列表为空({tmdb_id})", "WARN")
+            return None
+        log(f"TMDB 季列表(API): {tmdb_id} -> {sorted(result)}")
+        return result
+    except Exception as e:
+        # 防密钥泄漏: 异常信息里若带完整 URL 会把 api_key 写进日志, 统一打码
+        msg = str(e)
+        if TMDB_API_KEY:
+            msg = msg.replace(TMDB_API_KEY, "***")
+        log(f"TMDB API 季列表失败({tmdb_id}): {type(e).__name__} {msg}", "WARN")
+        return None
+
+
+def tmdb_web_season_list(tmdb_id, timeout=20):
+    r"""取该剧的**权威季列表** -> {季号: 季名}; 失败返回 None。
+
+    数据源: ① 若配置了 TMDB_API_KEY -> 官方 API /3/tv/<id>;
+            ② 否则解析官网页面 https://www.themoviedb.org/tv/<id>/seasons(无需密钥)。
+    实测(2026-10-14): 337277 -> {1: '第 1 季'}; 230050 -> {1, 2}; 117061 -> {0, 1, 2}。
+    注意官网季链接带 slug 形态(/tv/337277-restart/season/1), 正则须容忍 slug。
+    结果按 TMDB id 落盘缓存(TTL 见 TMDB_WEB_SEASON_TTL_DAYS)。"""
+    if not TMDB_WEB_SEASONS:
+        return None
+    tid = str(tmdb_id or "").strip()
+    if not tid.isdigit():
+        return None
+    if tid in _WEB_SEASON_MEM:
+        return _WEB_SEASON_MEM[tid]
+    # 1) 落盘缓存
+    try:
+        with open(_WEB_SEASON_CACHE, encoding="utf-8") as f:
+            disk = json.load(f)
+    except Exception:
+        disk = {}
+    ent = disk.get(tid)
+    if isinstance(ent, dict) and ent.get("seasons"):
+        try:
+            age_h = (time.time() - float(ent.get("ts") or 0)) / 3600.0
+        except (TypeError, ValueError):
+            age_h = 1e9
+        if age_h <= TMDB_WEB_SEASON_TTL_DAYS * 24:
+            result = {int(k): v for k, v in ent["seasons"].items()}
+            _WEB_SEASON_MEM[tid] = result
+            log(f"TMDB 季列表(官网缓存): {tid} -> {sorted(result)}")
+            return result
+    # 2) 抓取: 官方 API(配了 key 时) 优先, 失败/未配则解析官网页面
+    result = _tmdb_api_seasons(tid, timeout=timeout)
+    if result:
+        _WEB_SEASON_MEM[tid] = result
+        _save_web_season_cache(disk, tid, result)
+        return result
+    try:
+        html = _tmdb_web_get(f"https://www.themoviedb.org/tv/{tid}/seasons", timeout=timeout)
+    except Exception as e:
+        log(f"TMDB 官网季列表抓取失败({tid}): {type(e).__name__} {e}", "WARN")
+        _WEB_SEASON_MEM[tid] = None
+        return None
+    pat = re.compile(rf"/tv/{re.escape(tid)}(?:-[^/?\"']+)?/season/(\d+)")
+    names = {}
+    for m in re.finditer(rf"href=\"/tv/{re.escape(tid)}(?:-[^/?\"']+)?/season/(\d+)\"[^>]*>"
+                         rf"(?:\s*<[^>]+>)*\s*([^<]{{1,40}})", html):
+        sn, nm = int(m.group(1)), re.sub(r"\s+", " ", m.group(2)).strip()
+        if sn not in names and nm:
+            names[sn] = nm
+    nums = {int(x) for x in pat.findall(html)}
+    if not nums:
+        log(f"TMDB 官网季列表解析为空({tid})", "WARN")
+        _WEB_SEASON_MEM[tid] = None
+        return None
+    result = {n: names.get(n, f"第 {n} 季") for n in sorted(nums)}
+    log(f"TMDB 季列表(官网): {tid} -> {sorted(result)}")
+    _WEB_SEASON_MEM[tid] = result
+    _save_web_season_cache(disk, tid, result)
+    return result
+
+
+def tmdb_web_seasons_for_folder(library_root, folder_name):
+    """按库内目录取该剧的 TMDB id(来自 Emby 条目 ProviderIds.Tmdb) 再查官网季列表。"""
+    if not TMDB_WEB_SEASONS:
+        return None
+    item = _emby_series_item(library_root, folder_name)
+    if not item:
+        return None
+    pids = item.get("ProviderIds") or {}
+    tid = ""
+    for k, v in pids.items():
+        if str(k).lower() == "tmdb" and str(v).strip():
+            tid = str(v).strip()
+            break
+    if not tid.isdigit():
+        return None
+    return tmdb_web_season_list(tid)
+
+
 def tmdb_season_layout(library_root, folder_name):
     """查询 Emby 中该剧的 TMDB 季号列表(反映 TMDB 真实结构)。
     返回季号 set; 条目不存在或查询失败返回 None。结果按目录缓存。"""
@@ -1248,6 +1421,141 @@ def tmdb_season_layout(library_root, folder_name):
             log(f"查询 TMDB 季结构失败({folder_name}): {type(e).__name__} {e}", "WARN")
     _TMDB_SEASON_CACHE[ckey] = result
     return result
+
+
+def emby_season_item(library_root, folder_name, season):
+    """返回 Emby 中该剧第 season 季条目的关键字段(带缓存); 条目不存在/失败返回 None。"""
+    ckey = os.path.normcase(os.path.normpath(os.path.join(library_root, folder_name)))
+    cache = _TMDB_SEASON_CACHE.setdefault("#seasonitems", {})
+    key = (ckey, int(season))
+    if key in cache:
+        return cache[key]
+    result = None
+    sid = _emby_series_id(library_root, folder_name)
+    if sid:
+        try:
+            req = urllib.request.Request(
+                EMBY_HOST.rstrip("/") + "/emby/Items"
+                + f"?ParentId={sid}&Recursive=true&IncludeItemTypes=Season"
+                + "&Fields=IndexNumber,ProviderIds,PremiereDate,DateCreated"
+                + "&api_key=" + EMBY_API_KEY)
+            with urllib.request.urlopen(req, timeout=20) as r:
+                seasons = json.loads(r.read().decode("utf-8")).get("Items", [])
+            for s in seasons:
+                if s.get("IndexNumber") == int(season):
+                    result = {"PremiereDate": s.get("PremiereDate"),
+                              "ProviderIds": s.get("ProviderIds") or {},
+                              "DateCreated": s.get("DateCreated")}
+                    break
+        except Exception as e:
+            log(f"查询季条目元数据失败({folder_name} S{season}): {type(e).__name__} {e}", "WARN")
+    cache[key] = result
+    return result
+
+
+def season_lacks_provider_meta(library_root, folder_name, season, min_age_hours=2):
+    r"""该季条目是否"存在但完全无 provider 元数据"——判定 TMDB 无该季的关键信号。
+
+    实测(2026-10-14): 真实存在的 TMDB 季必带 PremiereDate + ProviderIds(Tvdb)
+    (归还者 S2: Premiere 2026-10-07 + Tvdb 2100335; 侦探已死 S0/S1/S2 同);
+    而 TMDB 条目里不存在、仅由本地目录回声出的季两者皆空(魔法少女育成计划 restart
+    的 Season 2 —— TMDB 337277 实为 2026 单季新番, 内容本属 S1)。
+
+    min_age_hours: 季条目创建不足该时长则不判定 —— 竞态防护: 本 run 刚入库触发 Emby
+    扫描出的新季条目, 其元数据抓取可能尚未完成, 不能当成"无元数据"。
+    返回 True/False; 条目不存在或无法判断时一律 False(保守不纠正)。"""
+    if not TMDB_ECHO_GUARD:
+        return False
+    item = emby_season_item(library_root, folder_name, season)
+    if not item:
+        return False
+    if item.get("PremiereDate") or item.get("ProviderIds"):
+        return False
+    dc = item.get("DateCreated")
+    if dc:
+        try:
+            t = datetime.fromisoformat(str(dc).replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            age_h = (datetime.now(timezone.utc) - t).total_seconds() / 3600.0
+            if age_h < min_age_hours:
+                log(f"季条目创建仅 {age_h:.1f}h, 暂不判定 TMDB 是否缺该季"
+                    f"({folder_name} S{season})")
+                return False
+        except Exception:
+            pass
+    return True
+
+
+def migrate_season_folder(library_root, folder_name, from_season, to_season, dry_run=False):
+    r"""把 Season from 目录下的既有文件改名并迁入 Season to(季结构纠正专用)。
+
+    * 媒体文件: 按 Sxx 改名迁入; 目标同集号已存在且大小不同 -> 跳过该文件并告警
+    * .nfo: 删除(旧季号/旧标题的过期元数据, 由 Emby 按新季重建)
+    * 其他(字幕/图片): 文件名含 S{from:02d} 则改名同迁, 否则原名迁移; 目标已存在则跳过
+    旧季目录清空后删除(仅限空目录, 不越过剧集目录)。返回迁移的媒体文件数。"""
+    src_dir = os.path.join(library_root, folder_name, f"Season {from_season}")
+    dst_dir = os.path.join(library_root, folder_name, f"Season {to_season}")
+    if not os.path.isdir(src_dir):
+        return 0
+    try:
+        names = sorted(os.listdir(src_dir))
+    except OSError:
+        return 0
+    try:
+        same = os.path.normcase(os.path.normpath(src_dir)) == \
+            os.path.normcase(os.path.normpath(dst_dir))
+    except Exception:
+        same = False
+    if same:
+        return 0
+    moved = 0
+    for name in names:
+        full = os.path.join(src_dir, name)
+        if not os.path.isfile(full):
+            continue
+        base, ext = os.path.splitext(name)
+        ext_l = ext.lower()
+        if ext_l == ".nfo":
+            if not dry_run:
+                try:
+                    os.remove(full)
+                    log(f"季迁移: 删除过期 nfo {name}(Emby 将按新季重建)")
+                except OSError as e:
+                    log(f"季迁移: 删除 nfo 失败({name}): {e}", "WARN")
+            continue
+        new_name = re.sub(rf"(?i)\bS{int(from_season):02d}\b",
+                          f"S{int(to_season):02d}", name)
+        if new_name == name:
+            new_name = rename_season_in_filename(name, to_season)
+        dst = os.path.join(dst_dir, new_name)
+        if os.path.exists(dst):
+            if ext_l in MEDIA_EXTS and os.path.getsize(dst) != os.path.getsize(full):
+                log(f"季迁移跳过(目标已存在且大小不同): {new_name}", "WARN")
+            else:
+                log(f"季迁移跳过(目标已存在): {new_name}")
+            continue
+        if dry_run:
+            log(f"[dry-run] 季迁移: Season {from_season}/{name} -> Season {to_season}/{new_name}")
+            if ext_l in MEDIA_EXTS:
+                moved += 1
+            continue
+        try:
+            os.makedirs(dst_dir, exist_ok=True)
+            shutil.move(full, dst)
+            log(f"季迁移: Season {from_season}/{name} -> Season {to_season}/{new_name}")
+            if ext_l in MEDIA_EXTS:
+                moved += 1
+        except OSError as e:
+            log(f"季迁移失败({name}): {e}", "WARN")
+    if not dry_run:
+        try:
+            if os.path.isdir(src_dir) and not os.listdir(src_dir):
+                os.rmdir(src_dir)
+                log(f"季迁移: 旧季目录为空, 已删除 Season {from_season}")
+        except OSError as e:
+            log(f"季迁移: 删除旧季目录失败(Season {from_season}): {e}", "WARN")
+    return moved
 
 
 def tmdb_season_episode_counts(library_root, folder_name):
@@ -1354,15 +1662,21 @@ def pick_season_by_name(library_root, folder_name, hints, exclude=None):
 
 
 def align_season_to_tmdb(library_root, folder_name, season, fn, src_size=None, abs_ep=None,
-                         name_hints=None):
+                         name_hints=None, dry_run=False):
     r"""按 TMDB 季结构对齐 ani-rss 的 cours 拆季。
 
     背景: ani-rss 按播出 cours 拆季(Season 1/2/3、乃至「第七季」), 而 TMDB 的季划分
     未必一致。判定目标季的优先级:
-      ① 单季剧(该剧在 TMDB 只有 Season 1) -> 多 cours 合并到 Season 1;
-      ② **按 TMDB 季名匹配**(如库内 JOJO 主条目 Season 6 名为「飙马野郎篇」, 而新番
+      ① 独立新条目型续作(**本地回声保护**): ani-rss 按"第N期"给 Season N, 但 TMDB
+         把它建成**独立新条目**且该条目只有 Season 1 —— Emby 的季列表此时只是本地
+         目录结构的回声,"Season N 存在"并不能证明 TMDB 有该季。判据 = 该季条目
+         存在却完全无 provider 元数据(见 season_lacks_provider_meta)。判中则归并到
+         Season 1 并迁移该季既有文件(实测 2026-10-14 魔法少女育成计划 restart:
+         ani-rss 给 Season 2, TMDB 337277 实为 2026 单季新番 -> S1);
+      ② 单季剧(该剧在 TMDB 只有 Season 1) -> 多 cours 合并到 Season 1;
+      ③ **按 TMDB 季名匹配**(如库内 JOJO 主条目 Season 6 名为「飙马野郎篇」, 而新番
          标题是「飙马野郎 JOJO的奇妙冒险 第一赛段」-> 归入 Season 6);
-      ③ 兜底: ani-rss 季号超出 TMDB 最大季且该季集数能容纳本集 -> 取最大季。
+      ④ 兜底: ani-rss 季号超出 TMDB 最大季且该季集数能容纳本集 -> 取最大季。
 
     集号改写: 若原始文件名带有绝对集号提示 abs_ep(如 [01_49] 的 49, 对应
     药屋少女的呢喃 这类 TMDB 单季绝对编号剧), 归并时把 cours 相对集号
@@ -1373,34 +1687,62 @@ def align_season_to_tmdb(library_root, folder_name, season, fn, src_size=None, a
     返回 (season, fn)。"""
     if season is None or season <= 1:
         return season, fn
-    idx = tmdb_season_layout(library_root, folder_name)
-    if not idx or season in idx:
-        return season, fn
+    # 数据源优先级: TMDB 官网季列表(权威) > Emby 季列表(仅本地目录回声, 兜底)
+    web = tmdb_web_seasons_for_folder(library_root, folder_name)
+    idx = None if web is not None else tmdb_season_layout(library_root, folder_name)
+    if not web and not idx:
+        return season, fn          # 无任何数据: 不猜(下次入库自愈)
+    idx_eff = set(web) if web is not None else set(idx)
 
     m = FINAL_NAME_RE.match(os.path.splitext(fn)[0])
     cur_ep = int(m.group("ep")) if m and m.group("ep").isdigit() else None
-
     target, reason = None, ""
-    if len(idx) == 1 and 1 in idx:
-        target, reason = 1, "该剧在 TMDB 仅一季, 多 cours 合并"
+
+    if season in idx_eff:
+        if web is not None:
+            return season, fn      # 官网季列表确认该季存在(权威放行)
+        # ① 本地回声保护: 目录内除本季外无其他季内容, 且该季条目"存在但无 provider
+        # 元数据" -> TMDB 无该季, 本内容属于该 TMDB 条目的 Season 1。
+        others = {s for s in idx_eff if s not in (0, season)}
+        if TMDB_ECHO_GUARD and not others \
+                and season_lacks_provider_meta(library_root, folder_name, season):
+            target, reason = 1, "TMDB 无该季(季条目无 provider 元数据), 独立新条目型续作"
+        else:
+            return season, fn
+    elif len(idx_eff) == 1:
+        only = 1 if 1 in idx_eff else min(idx_eff)
+        target = only
+        reason = "该剧在 TMDB 仅一季(官网季列表), 多 cours 合并" if web is not None \
+            else "该剧在 TMDB 仅一季, 多 cours 合并"
+        if web is None and only != 1:
+            return season, fn      # 仅 Specials 等异常结构时保守不动
     else:
         picked = pick_season_by_name(
             library_root, folder_name,
             list(name_hints or []) + [folder_name, strip_season_marker(folder_name)],
             exclude=season)
-        if picked is not None:
+        if picked is not None and picked in idx_eff:
             target, reason = picked, "按 TMDB 季名匹配"
         else:
-            mx = max(idx)
+            mx = max(idx_eff)
             counts = tmdb_season_episode_counts(library_root, folder_name) or {}
             cand_ep = abs_ep if abs_ep is not None else cur_ep
             if season > mx and cand_ep is not None and counts.get(mx, 0) >= cand_ep:
                 target, reason = mx, f"ani-rss 季号超出 TMDB 最大季 {mx}, 归入最大季"
 
     if target is None:
-        log(f"TMDB 季结构 {sorted(idx)} 中无 Season {season}, 且无法确定归属季, "
+        log(f"TMDB 季结构 {sorted(idx_eff)} 中无 Season {season}, 且无法确定归属季, "
             f"保持原季号 ({folder_name})", "WARN")
         return season, fn
+
+    # 归并前先把该季**既有文件**一并迁到目标季(否则会留下半迁移的混合结构:
+    # 新文件在 S01、旧文件还在 S02)。仅在同一次运行内按目录迁移, 目标冲突文件跳过。
+    if target != season:
+        moved = migrate_season_folder(library_root, folder_name, season, target,
+                                      dry_run=dry_run)
+        if moved:
+            log(f"季结构纠正: TMDB 无 Season {season}, 既有 {moved} 个媒体文件"
+                f"自 Season {season} 迁入 Season {target} ({folder_name})", "WARN")
 
     new_fn = rename_season_in_filename(fn, target)
     if abs_ep is not None and cur_ep is not None and abs_ep != cur_ep \
@@ -1767,6 +2109,29 @@ def resolve_show_folder_raw(title, season, torrent_name, content_path=None):
                     if not _valid_year(year):
                         year = str(now().year)
                         log("无法确定首播年, 年份回退为当前年份", "WARN")
+                    # 目录基础名与 Emby 显示名对齐(仅新建分支, 不影响库内匹配):
+                    # Emby 展示的剧名来自 TMDB 元数据, 而 Bangumi 与 TMDB 的译名
+                    # 可能不同(实测 2026-10-14: Bangumi「归还者的魔法要特别」vs
+                    # TMDB/Emby「重生者的魔法一定要特别」)。目录名若用 Bangumi 名,
+                    # 用户会看到目录与 Emby 条目名对不上。TMDB 反查已有 CJK 规范名
+                    # (与 Emby 显示名同源)时优先采用, 否则回退 Bangumi 名。
+                    if tmdb_nm and _has_cjk(tmdb_nm) and _norm_text(tmdb_nm) != _norm_text(base):
+                        log(f"目录名按 TMDB 规范名(与 Emby 显示名一致): {base} -> {tmdb_nm}")
+                        base = tmdb_nm
+                        # 换名后重新尝试库内既有目录匹配: 缓存失效等场景下
+                        # TMDB 名目录可能已存在, 复用而非新建
+                        hit2 = match_existing_folder(base, hint_year=ar_year, season=season) \
+                            or match_franchise_folder(base, hint_year=ar_year)
+                        if hit2:
+                            cache[key] = hit2[1]
+                            cache[f"{key}|id"] = item.get("id")
+                            cache[f"{key}|base"] = base
+                            if tmdb_id:
+                                cache[f"{key}|tmdb"] = tmdb_id
+                            save_cache(cache)
+                            log(f"对齐库内既有目录(TMDB 规范名): {base} -> "
+                                f"{hit2[0]}\\{hit2[1]} (Bangumi id={item.get('id')}, 查询词={via})")
+                            return hit2, f"库内对齐(TMDB规范名:{via})"
                     folder = f"{base} ({year})"
                     cache[key] = folder
                     cache[f"{key}|id"] = item.get("id")
@@ -1907,6 +2272,19 @@ SEASON_OVERRIDES = [
         "season": 1,
         "ep_offset": 50,
     },
+    {
+        # 归还者的魔法要特别 第二季(2026-10-08 起): Baha/蜜柑用**跨季绝对编号**
+        # (第一季 12 话, S2 第 1 话标题为"13")。首播当晚该剧目录为新建, Emby 尚无
+        # 条目 -> TMDB 每季重排对齐因查不到分集数据而跳过, 2026-10-14 实测
+        # S02E13 误入库(应为 S02E01, 已人工纠正)。ep_offset 负值 = 绝对集号回排
+        # 为每季编号(E13 -> E01); 后续集 Emby 扫描后由 TMDB 对齐路径自然处理
+        # (E14 -> E02), 与本条结果一致、互不冲突。
+        # ⚠ 第三季若仍用绝对编号, 需按其前季累计集数更新偏移; 若改用每季编号则删除本条。
+        "show": ["归还者的魔法要特别", "重生者的魔法一定要特别"],
+        "file": ["kikansha no mahou wa tokubetsu desu", "第二季", "第2季"],
+        "season": 2,
+        "ep_offset": -12,
+    },
 ]
 
 
@@ -1930,9 +2308,10 @@ def _season_override_entry(folder_name, orig_texts):
 
 
 def season_override_target(folder_name, orig_texts):
-    r"""按 SEASON_OVERRIDES 判定本集应强制归入的季号; 未命中返回 None。"""
+    r"""按 SEASON_OVERRIDES 判定本集应强制归入的季号; 未命中或条目未配置
+    season 字段时返回 None(条目可只用于集号偏移, 不强制季号)。"""
     ov = _season_override_entry(folder_name, orig_texts)
-    return int(ov["season"]) if ov else None
+    return int(ov["season"]) if ov and ov.get("season") is not None else None
 
 
 def season_override_ep_offset(folder_name, orig_texts):
@@ -2634,7 +3013,8 @@ def move_into_library(workdir, torrent_name, dry_run=False, content_path=None, a
         season, fn = align_season_to_tmdb(
             library_root, folder_name, season, fn,
             src_size=None if dry_run else os.path.getsize(full), abs_ep=_hint,
-            name_hints=[resolved_name_hint(show_title, season), show_title, torrent_name])
+            name_hints=[resolved_name_hint(show_title, season), show_title, torrent_name],
+            dry_run=dry_run)
         # ani-rss 跨季连续集号时(如异人旅馆 S02E14), 按 TMDB 每季重排编号对齐
         season, fn = align_episode_to_tmdb(
             library_root, folder_name, season, fn,
@@ -2654,27 +3034,35 @@ def move_into_library(workdir, torrent_name, dry_run=False, content_path=None, a
                     log(f"季覆写改名失败, 保持原名: {e}", "WARN")
             fn = new_fn
             season = ov
-        # 绝对集号续排(SEASON_OVERRIDES 的 ep_offset): 续作并入 TMDB 合并单季时,
+        # 集号偏移(SEASON_OVERRIDES 的 ep_offset): 正值 = 续作并入 TMDB 合并单季时,
         # 把 cours 相对集号改写为绝对集号(实测东京复仇者 三天战争篇: 第4期
-        # E01/E02 -> S01E51/E52, TMDB Season 1 共 55 集, 库内已排至 E50)
+        # E01/E02 -> S01E51/E52, TMDB Season 1 共 55 集, 库内已排至 E50);
+        # 负值 = 跨季绝对编号回排为每季编号(实测归还者的魔法要特别 S2:
+        # 标题"13"实为 S02E01, E13 + (-12) = E01)。结果 <1 时拒绝改写。
         _ov_off = season_override_ep_offset(folder_name, [_orig, torrent_name])
         if _ov_off:
             m_off = FINAL_NAME_RE.match(os.path.splitext(fn)[0])
             if m_off and m_off.group("ep").isdigit():
                 _old_ep = int(m_off.group("ep"))
-                new_fn = rename_episode_in_filename(fn, _old_ep + _ov_off)
-                if new_fn != fn:
-                    log(f"绝对集号续排: E{_old_ep:02d} -> E{_old_ep + _ov_off:02d}"
-                        f"(+{_ov_off}, 续作并入合并单季) | {new_fn}")
-                    if not dry_run:
-                        try:
-                            new_full = os.path.join(os.path.dirname(full), new_fn)
-                            os.rename(full, new_full)
-                            full = new_full
-                        except OSError as e:
-                            log(f"集号续排改名失败, 保持原名: {e}", "WARN")
-                            new_fn = fn
-                    fn = new_fn
+                _new_ep = _old_ep + _ov_off
+                if _new_ep < 1:
+                    log(f"集号偏移结果非法(E{_old_ep:02d}{_ov_off:+d} -> E{_new_ep}), "
+                        f"拒绝改写({folder_name})", "WARN")
+                else:
+                    new_fn = rename_episode_in_filename(fn, _new_ep)
+                    if new_fn != fn:
+                        _why = "绝对集号续排" if _ov_off > 0 else "绝对集号回排(每季编号)"
+                        log(f"{_why}: E{_old_ep:02d} -> E{_new_ep:02d} "
+                            f"({_ov_off:+d}) | {new_fn}")
+                        if not dry_run:
+                            try:
+                                new_full = os.path.join(os.path.dirname(full), new_fn)
+                                os.rename(full, new_full)
+                                full = new_full
+                            except OSError as e:
+                                log(f"集号偏移改名失败, 保持原名: {e}", "WARN")
+                                new_fn = fn
+                        fn = new_fn
         # 同集号已有其他版本时按主/备角色路由(主组替换备组/备组让位/去重/冲突备份)
         if not dry_run and route_episode_collision(
                 full, library_root, folder_name, season, fn,

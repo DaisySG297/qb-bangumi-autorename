@@ -21,6 +21,11 @@ venv/
 *.dll
 *.pyd
 
+# 本地改动前快照(不入库)
+*.bak
+*.bak_*
+*.bak.*
+
 # 系统
 Thumbs.db
 Desktop.ini
