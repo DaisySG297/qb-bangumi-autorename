@@ -1952,6 +1952,14 @@ def resolve_show_folder_raw(title, season, torrent_name, content_path=None):
     规则: 库内已有同一部番剧时, 新一季对齐既有目录; 但**同名不同版**(如乱马½
           1989 版 / 2024 重制版, TMDB 独立条目)不并入——以 ani-rss 目录的该季
           播出年为参考, 与既有目录年份差超 YEAR_SPLIT_GAP 即跳过。"""
+    # ⓪ 发布名重写(TITLE_REWRITES): 短名搜错剧时先做身份纠偏(v29)
+    for _kw, _canon in TITLE_REWRITES:
+        if _kw and _norm_text(t2s(_kw)) in _norm_text(t2s(title or "")):
+            if title != _canon:
+                log(f"发布名重写: {title} -> {_canon}")
+                title = _canon
+            break
+
     cache = load_cache()
     key = f"{title.casefold()}|S{season}"
 
@@ -2223,6 +2231,16 @@ GROUP_DEPRIORITIZED = ["ani"]
 #     原始文件名在改名工具运行前截获, 如 Nix-Raws 的 "...The Prince of Tennis II S03E01...")。
 # 命中后本集强制归入 season 季(覆盖 ani-rss 校正与 TMDB 对齐的结果)。
 # 未命中任何条目 -> 完全不影响原有流程。
+# 发布名重写(v29): 外站发布短名与真实剧名相差过远、Bangumi/TMDB 按短名搜索
+# 会命中**错误剧集**时, 在目录解析最前端把搜索标题重写为规范名(库内目录名/
+# Bangumi 名), 后续全部环节(库内匹配/Bangumi/TMDB 反查)都按规范名走。
+# 实测 2026-10-17: "[Anti-DEI] Yukionna - 02" 的 "Yukionna" 被 TMDB 反查成
+# 《与雪女同行吃蟹》(tmdbId=201607), 正确是《不擅交际的未亡人雪女与诅咒戒指》
+# (tmdbId=337408, 库内 NSFW 目录已存在)。⚠ 关键词必须足够特异(归一化子串匹配)。
+TITLE_REWRITES = [
+    ("yukionna", "不擅交际的未亡人雪女与诅咒戒指"),
+]
+
 SEASON_OVERRIDES = [
     {
         # 新网球王子 U-17 世界杯系列: 2026 决赛成员决定战 = TMDB Season 3
