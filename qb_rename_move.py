@@ -3068,9 +3068,23 @@ def move_into_library(workdir, torrent_name, dry_run=False, content_path=None, a
             if m_off and m_off.group("ep").isdigit():
                 _old_ep = int(m_off.group("ep"))
                 _new_ep = _old_ep + _ov_off
-                if _new_ep < 1:
-                    log(f"集号偏移结果非法(E{_old_ep:02d}{_ov_off:+d} -> E{_new_ep}), "
-                        f"拒绝改写({folder_name})", "WARN")
+                # 绝对集号误加偏移防护(v30): 发布组有时直接给**绝对集号**
+                # (实测 2026-10-19 Nekomoe 药屋 [51] = TMDB S1E51 绝对号,
+                # 却被 +48 算成 E99)。正值偏移时若结果超出该季总集数、而
+                # 原集号本身在范围内, 判定原集号已是绝对集号, 跳过偏移。
+                _skip_off = False
+                if _ov_off > 0 and _new_ep >= 1:
+                    _counts = tmdb_season_episode_counts(library_root, folder_name)
+                    _total = (_counts or {}).get(season)
+                    if _total and _new_ep > _total and 1 <= _old_ep <= _total:
+                        log(f"集号偏移防护: E{_old_ep:02d}{_ov_off:+d}=E{_new_ep:02d} "
+                            f"超出 Season {season} 总集数({_total}), 而原集号在范围内 "
+                            f"-> 判定已是绝对集号, 跳过偏移", "WARN")
+                        _skip_off = True
+                if _new_ep < 1 or _skip_off:
+                    if _new_ep < 1:
+                        log(f"集号偏移结果非法(E{_old_ep:02d}{_ov_off:+d} -> E{_new_ep}), "
+                            f"拒绝改写({folder_name})", "WARN")
                 else:
                     new_fn = rename_episode_in_filename(fn, _new_ep)
                     if new_fn != fn:
