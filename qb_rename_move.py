@@ -879,10 +879,34 @@ def split_folder_year(folder_name):
     return (folder_name or "").strip(), ""
 
 
+def _same_base_other_year_exists(base, self_name):
+    r"""全部库根中是否存在同基础名、不同年份的兄弟目录(同名不同版的实体证据)。
+    用于 align_folder_year 的同名不同版判定: 只有兄弟目录真实存在时, >年差的
+    拒改保护才有意义; 否则本目录就该对齐 TMDB 首播年。"""
+    want = _norm_text(t2s(base))
+    if not want:
+        return False
+    for root in MATCH_LIBRARY_DIRS:
+        try:
+            for name in os.listdir(root):
+                if name == self_name or not os.path.isdir(os.path.join(root, name)):
+                    continue
+                other_base, _y = split_folder_year(name)
+                if _norm_text(t2s(other_base)) == want:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def align_folder_year(library_root, folder_name, tmdb_year, tmdb_name=None):
     r"""确保目录名年份 = TMDB 首播年。不一致时**重命名既有目录**并同步 tvshow.nfo。
     返回最终使用的目录名(可能已改名)。这是防止 Emby 因年份不符而匹配不到 TMDB 的关键。
-    年份相差超过 YEAR_SPLIT_GAP 时视为同名不同版(改目录会毁掉另一版条目), 不改名仅告警。"""
+    年份相差超过 YEAR_SPLIT_GAP 时视为同名不同版(改目录会毁掉另一版条目), 不改名仅告警。
+    例外(v31): 库内**不存在**同基础名不同年份的兄弟目录、且 TMDB 规范名与本目录
+    基础名一致时, 判定本目录就是该 TMDB 条目, 仍按 TMDB 首播年改名(实测钻石王牌:
+    ani-rss 用上架年 2026 建目录, TMDB 60761 首播 2013, 守卫误拒改名 ->
+    目录名年份与 nfo 年份互相矛盾, Emby 按 2026 搜索匹配不到, 条目无海报无元数据)。"""
     base, cur_year = split_folder_year(folder_name)
     if not _valid_year(str(tmdb_year)):
         return folder_name
@@ -893,9 +917,17 @@ def align_folder_year(library_root, folder_name, tmdb_year, tmdb_name=None):
         return folder_name  # 年份接近, 视为同一部, 不折腾
     if cur_year and abs(int(cur_year) - int(tmdb_year)) > YEAR_SPLIT_GAP:
         # 同名不同版(如 乱马½ (1989) vs TMDB 2024 重制版): 目录归属另一个 TMDB 条目, 不动
+        _sibling = _same_base_other_year_exists(base, folder_name)
+        _name_ok = bool(tmdb_name) and _norm_text(t2s(tmdb_name)) == _norm_text(t2s(base))
+        if _sibling or not _name_ok:
+            log(f"既有目录 {folder_name} 与 TMDB 首播年 {tmdb_year} 相差超 {YEAR_SPLIT_GAP} 年"
+                + (f"(库内存在同名不同版兄弟目录)" if _sibling else "(TMDB 名不一致/未提供)"),
+                "WARN")
+            log(f"判定为同名不同版条目, 不改名; 内容应另建目录", "WARN")
+            return folder_name
         log(f"既有目录 {folder_name} 与 TMDB 首播年 {tmdb_year} 相差超 {YEAR_SPLIT_GAP} 年, "
-            f"判定为同名不同版条目, 不改名; 内容应另建目录", "WARN")
-        return folder_name
+            f"但库内无同名不同版目录且 TMDB 名一致, 判定为 ani-rss 上架年误导, "
+            f"仍按 TMDB 首播年改名", "WARN")
 
     new_folder = f"{base} ({tmdb_year})"
     src = os.path.join(library_root, folder_name)
