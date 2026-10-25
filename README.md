@@ -12,6 +12,8 @@
 
 ---
 
+> 📖 **新用户从这里开始**：[从零跑通教程](docs/tutorial.md) —— 目录规划、环境变量配置、qB 触发、首跑验证、日常运维的完整分步指南。本文其余部分为参考手册。
+
 ## 背景
 
 用 ani-rss + qBittorrent 自动追番时，下载完成的文件名五花八门，直接丢进媒体库 Emby 经常识别失败或元数据残缺。本项目把「改名 → 匹配 → 入库」整条链路自动化，并解决了三个最隐蔽的坑（都来自真实翻车现场）：
@@ -117,6 +119,8 @@ SEASON_OVERRIDES = [
 未配置 ani-rss（`QBR_ANIRSS_HOST` 为空）时静默退回通用冲突规则，功能不受影响。
 
 ## 安装
+
+> 分步安装指引（含目录规划、验证方法与常见翻车点）见 [docs/tutorial.md](docs/tutorial.md)。
 
 ```bash
 git clone https://github.com/DaisySG297/qb-bangumi-autorename.git
