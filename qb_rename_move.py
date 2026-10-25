@@ -124,14 +124,16 @@ VENDOR_DIR = os.path.join(TOOLS_DIR, "_vendor")     # 本地依赖(zhconv 繁简
 BANGUMI_CATEGORIES = {_env("QBR_CATEGORY", "ani-rss")}
 BANGUMI_TAGS = set()
 
-# 入库后对 qB 中种子任务的处理(仅不做种模式生效):
-#   "delete"=删除种子任务(默认) | "pause"=暂停 | "keep"=不动
+# 对 qB 中种子任务的处理(仅不做种模式生效, 在处理开始时前置执行):
+#   "delete"=删除种子任务(默认, deleteFiles=false 文件保留) | "pause"=暂停 | "keep"=不动
+# 先释放再搬移, 避免 qB 活动任务对被移走的文件报 I/O 错误(file_open)弹窗;
+# 代价: 若后续处理失败, 种子已不在 qB, 文件保留在暂存/待归档, 可 --retry 重试
 # 做种模式(TRANSFER_MODE="seed")下本项被忽略, 种子任务一律保留继续上传
 SEED_ACTION = _env("QBR_SEED_ACTION", "delete")
 # 转移方式可选(做种开关):
-#   "no_seed" 不做种: 媒体文件从暂存直接移动到工作区, 不留副本; 入库后种子按 SEED_ACTION 处理
+#   "no_seed" 不做种: 处理开始先按 SEED_ACTION 释放种子任务, 媒体文件从暂存直接移动到工作区, 不留副本
 #   "seed"    做种:   工作区用硬链接(同盘瞬时、不占额外空间), 跨盘自动回退为复制;
-#                     下载目录原文件保留, qB 继续做种, 入库后不动 qB 种子任务
+#                     下载目录原文件保留, qB 继续做种, 不动 qB 种子任务
 # 命令行可用 --seed / --no-seed 临时覆盖本配置
 TRANSFER_MODE = _env("QBR_TRANSFER_MODE", "no_seed").lower()   # "no_seed" | "seed"
 QB_HOST = _env("QBR_QB_HOST", "http://127.0.0.1:8080")
@@ -3226,22 +3228,29 @@ def qb_api(path, data=None):
     return json.loads(raw.decode()) if raw.strip() else {}
 
 
-def seed_action(hash_id, torrent_name):
-    if TRANSFER_MODE == "seed":
-        log(f"做种模式: 保留种子任务继续上传, 不动 qB | {torrent_name}")
+def pre_release_torrent(hash_id, torrent_name, dry_run=False):
+    """不做种模式: 处理开始前先释放 qB 对暂存文件的持有(删种/暂停), 再移动文件。
+    否则移动文件期间 qB 仍持有活动任务, 会对被移走的文件报 I/O 错误(file_open)弹窗。
+    SEED_ACTION=delete → 先删种子任务(deleteFiles=false, 文件保留供搬移入库);
+    SEED_ACTION=pause  → 先暂停(可人工恢复的回滚点)。dry-run 完全不动 qB。"""
+    if TRANSFER_MODE == "seed" or SEED_ACTION not in ("pause", "delete") or not hash_id:
         return
-    if SEED_ACTION not in ("pause", "delete") or not hash_id:
+    if dry_run:
         return
     try:
-        if SEED_ACTION == "pause":
-            qb_api("/api/v2/torrents/pause", {"hashes": hash_id})
-            log(f"已暂停种子: {torrent_name}")
+        if SEED_ACTION == "delete":
+            # deleteFiles=false: 只删任务, 暂存文件保留, 后续流程照常搬移入库
+            qb_api("/api/v2/torrents/delete", {"hashes": hash_id, "deleteFiles": "false"})
+            log(f"已删除种子任务(文件保留, 移动入库中): {torrent_name}")
         else:
-            # 文件已被移走, deleteFiles 仅清理种子任务及其残留
-            qb_api("/api/v2/torrents/delete", {"hashes": hash_id, "deleteFiles": "true"})
-            log(f"已删除种子任务(文件已移入媒体库): {torrent_name}")
+            try:
+                # qB 5.x 推荐 /torrents/stop; 旧版回退 /torrents/pause
+                qb_api("/api/v2/torrents/stop", {"hashes": hash_id})
+            except Exception:
+                qb_api("/api/v2/torrents/pause", {"hashes": hash_id})
+            log(f"已预暂停种子(防止搬移期间 I/O 错误): {torrent_name}")
     except Exception as e:
-        log(f"种子动作({SEED_ACTION})失败: {e}", "WARN")
+        log(f"前置释放种子({SEED_ACTION})失败(继续处理): {e}", "WARN")
 
 
 # ---------------------------- 主流程 ----------------------------
@@ -3255,6 +3264,7 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
     log(f"开始处理: {torrent_name} | 分类={category} | 路径={content_path}")
     _RUN["meta"].update(torrent=torrent_name, category=category, dry_run=dry_run)
     notify("start", f"开始处理 `{torrent_name}`")
+    pre_release_torrent(hash_id, torrent_name, dry_run=dry_run)
     if not os.path.exists(content_path):
         raise RuntimeError(f"内容路径不存在: {content_path}")
 
@@ -3342,8 +3352,7 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
             log(f"完成: 入库 {archived} 个文件, 残留 {pending} 个"
                 + (" [DRY-RUN 未实际移动]" if dry_run else ""))
             notify("result", f"入库 {archived} 个文件" + (f", 残留 {pending} 个" if pending else ""))
-            if not dry_run:
-                seed_action(hash_id, torrent_name)
+            # 种子任务已在处理开始时前置删除/暂停(pre_release_torrent), 此处无需再动 qB
         if not dry_run:
             # 不做种模式下暂存中已移出的目录若已为空则逐级清理;
             # 做种模式下原文件仍在, 目录非空, 此处自然不会删除

@@ -150,7 +150,7 @@ pip install zhconv   # 繁简转换（也可放到脚本同目录 _vendor/ 下�
 | `QBR_ANIRSS_HOST` | （空） | ani-rss 地址，如 `http://192.168.1.10:7789`；配置后启用主/备组角色识别 |
 | `QBR_ANIRSS_KEY` | （空） | ani-rss 的 apiKey（WebUI 设置页可见，请求头 `X-Api-Key`） |
 | `QBR_TRANSFER_MODE` | `no_seed` | 转移方式：`no_seed`=不做种，直接移动不留副本；`seed`=做种，硬链接/复制保留原文件 |
-| `QBR_SEED_ACTION` | `delete` | 仅不做种模式生效：入库后删除 qB 种子任务（`pause` 暂停 / `keep` 不动）；做种模式下忽略，任务一律保留 |
+| `QBR_SEED_ACTION` | `delete` | 仅不做种模式生效：处理开始时**前置**删除 qB 种子任务（`deleteFiles=false`，文件保留供搬移入库，避免 qB 对被移走的文件报 I/O 错误；`pause` 暂停 / `keep` 不动）；做种模式下忽略，任务一律保留 |
 | `QBR_DINGTALK_WEBHOOK` | （空） | 钉钉群自定义机器人 Webhook（填了才启用通知） |
 | `QBR_DINGTALK_SECRET` | （空） | 加签密钥（`SEC` 开头，安全设置选「加签」时填） |
 | `QBR_DINGTALK_ENABLED` | 有 Webhook 时为 `true` | 总开关 |
