@@ -690,6 +690,24 @@ def restore_workdir_names(workdir):
     return count
 
 
+def _no_window_kwargs():
+    """子进程不弹控制台黑框。
+
+    为什么需要: 本脚本由 qB 以 pythonw.exe 拉起 —— pythonw 是 GUI 子系统进程, 自身
+    **没有控制台**。而改名工具是控制台子系统程序(PE Subsystem=3), 当父进程无控制台时,
+    Windows 会为它**新分配一个控制台窗口**, 即用户看到的那个停留数秒的黑框。
+    加 CREATE_NO_WINDOW 后子进程仍拥有控制台(标准输入输出管道照常工作), 只是不显示窗口。
+    """
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE (双保险)
+        kw["startupinfo"] = si
+    return kw
+
+
 def run_renamer(workdir, timeout=600):
     """在 workdir 下调用改名 exe, 自动确认 y, 返回 (成功?, stdout)"""
     env = dict(os.environ)
@@ -698,6 +716,7 @@ def run_renamer(workdir, timeout=600):
         p = subprocess.run(
             [RENAME_EXE], cwd=workdir, input=b"y\n",
             capture_output=True, timeout=timeout, env=env,
+            **_no_window_kwargs(),
         )
         raw = (p.stdout or b"") + b"\n" + (p.stderr or b"")
         try:
@@ -2318,19 +2337,18 @@ SEASON_OVERRIDES = [
         "ep_offset": -12,
     },
     {
-        # 药屋少女的呢喃 第三季(2026-10-02 起): TMDB(220542) 是**合并单季**结构,
-        # S1 共 60 集, 第三季 E01-E03 = TMDB S1E49-E51(蝗虫/火鼠的皮衣/如果
-        # 没有面包), 库内已排至 S01E50。Bangumi/ani-rss 视作独立条目按 S03
-        # 相对编号 -> season 1 + ep_offset 48。实测 2026-10-17: E03 因"TMDB
-        # 季结构 [0,1] 中无 Season 3 且无法确定归属季"被保持 S03E03, 落进
-        # TMDB 不存在的 Season 3(Emby 靠 Tvdb 源挂出「第三季 第3话」, 与
-        # TMDB 结构不一致)。⚠ 第三季共 12 话(E49-E60), 全部完结后本条可删。
+        # 药屋少女的呢喃 第三季(2026-10-02 起): TMDB(220542) 是**合并单季**结构
+        # (库内仅 S1 归集, 分集 E01..E60 绝对连续)。⚠ ani-rss 已从"相对编号"
+        # 切换为**绝对集号**直接给 [49]/[51]/[52] 等(实测 2026-10-19 [51]、
+        # 2026-10-26 [52]), 故不再需要 ep_offset 续排 —— 旧 ep_offset=48 曾把
+        # 绝对号 52 误加成 100(2026-10-26 事故)。保留 season:1 仅做季归属覆盖
+        # (把 ani-rss 的 S03 归入库内 S01)。⚠ 第三季共 12 话(E49-E60),
+        # 全部完结后本条可删。
         "show": ["药屋少女的呢喃", "藥屋少女的呢喃", "药屋少女的独语",
                  "藥屋少女的独语", "药师少女的独语", "藥師少女的獨語"],
         "file": ["kusuriya no hitorigoto s3", "药师少女的独语", "第三季",
                  "第三季", "season 3"],
         "season": 1,
-        "ep_offset": 48,
     },
 ]
 
@@ -3102,15 +3120,26 @@ def move_into_library(workdir, torrent_name, dry_run=False, content_path=None, a
             if m_off and m_off.group("ep").isdigit():
                 _old_ep = int(m_off.group("ep"))
                 _new_ep = _old_ep + _ov_off
-                # 绝对集号误加偏移防护(v30): 发布组有时直接给**绝对集号**
+                # 绝对集号误加偏移防护(v30/v32): 发布组有时直接给**绝对集号**
                 # (实测 2026-10-19 Nekomoe 药屋 [51] = TMDB S1E51 绝对号,
-                # 却被 +48 算成 E99)。正值偏移时若结果超出该季总集数、而
-                # 原集号本身在范围内, 判定原集号已是绝对集号, 跳过偏移。
+                # 却被 +48 算成 E99)。正值偏移(续排)时, 以下两种情况都说明
+                # 原集号已是绝对集号, 不应再加偏移:
+                #   ① 结果超出该季总集数、而原集号本身仍在季内范围;
+                #   ② (v32 补) 原集号本身已 >= 该季总集数 —— 续排偏移的语义是
+                #      "把 cours 相对集号(1..N) 续排为绝对集号", 而相对集号
+                #      不可能超过该季总集数; 一旦原集号已触及/越过总集数,
+                #      它必然是绝对集号(实测 2026-10-26 药屋 [52] 被 +48
+                #      算成 E100, 因 TMDB 该季总集数=51 时 52>51 逃过旧防护)。
                 _skip_off = False
                 if _ov_off > 0 and _new_ep >= 1:
                     _counts = tmdb_season_episode_counts(library_root, folder_name)
                     _total = (_counts or {}).get(season)
-                    if _total and _new_ep > _total and 1 <= _old_ep <= _total:
+                    if _total and _old_ep >= _total:
+                        log(f"集号偏移防护: E{_old_ep:02d} 已 >= Season {season} "
+                            f"总集数({_total}), 判定原集号已是绝对集号, 跳过 "
+                            f"+{_ov_off} 偏移", "WARN")
+                        _skip_off = True
+                    elif _total and _new_ep > _total and 1 <= _old_ep <= _total:
                         log(f"集号偏移防护: E{_old_ep:02d}{_ov_off:+d}=E{_new_ep:02d} "
                             f"超出 Season {season} 总集数({_total}), 而原集号在范围内 "
                             f"-> 判定已是绝对集号, 跳过偏移", "WARN")
