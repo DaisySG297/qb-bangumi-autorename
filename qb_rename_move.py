@@ -3293,18 +3293,32 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
     log(f"开始处理: {torrent_name} | 分类={category} | 路径={content_path}")
     _RUN["meta"].update(torrent=torrent_name, category=category, dry_run=dry_run)
     notify("start", f"开始处理 `{torrent_name}`")
-    pre_release_torrent(hash_id, torrent_name, dry_run=dry_run)
-    if not os.path.exists(content_path):
+    # 先做全部"只读"前置校验(不碰 qB): 内容路径存在 -> 文件就绪 -> 有媒体文件。
+    # 任何一步失败都在删种子之前抛异常, 保证"删种"与"文件存在"之间不再产生
+    # 孤儿任务(实测 2026-11-06: 旧逻辑先删种后查路径, 路径不存在时种子已删、
+    # 文件残留 -> qB 反复报 missingFiles / I/O 错误)。
+    # 多层嵌套目录种子容错(实测 2026-11-09 太空船 Nix-Raws): qB 的 %F 是嵌套
+    # 目录深处的文件路径, 一旦该路径因 qB 移动/嵌套结构不准确而失效, 就回退到
+    # %D(save_path 保存目录)递归收集, 避免"路径不存在"误判导致丢文件/孤儿。
+    resolved_path = content_path
+    if not os.path.exists(content_path) and save_path and os.path.isdir(save_path):
+        log(f"内容路径不存在, 回退到保存目录递归收集: {save_path}", "WARN")
+        resolved_path = save_path
+
+    if not os.path.exists(resolved_path):
         raise RuntimeError(f"内容路径不存在: {content_path}")
 
-    if not wait_content_ready(content_path):
+    if not wait_content_ready(resolved_path):
         raise RuntimeError("等待文件就绪超时(仍有 .!qB 临时文件)")
 
-    media_files = collect_media_files(content_path)
+    media_files = collect_media_files(resolved_path)
     if not media_files:
         log("任务中无媒体文件(视频/字幕), 仅跳过入库")
         notify("skip", "任务中无媒体文件(视频/字幕), 仅跳过入库")
         return
+
+    # 全部校验通过后才释放种子任务(删种/暂停), 避免"删了种但文件缺失"的孤儿
+    pre_release_torrent(hash_id, torrent_name, dry_run=dry_run)
 
     # 改名会丢失原始文件名, 而绝对集号提示([01_49] 的 49)与季归属信号恰在里面。
     # 以 (大小, mtime) 为键建立映射, 改名后仍可反查(改名不改动大小/mtime)
