@@ -1,50 +1,34 @@
-r"""
+# -*- coding: utf-8 -*-
+"""
 qb_rename_move.py — qBittorrent 番剧下载完成 → 自动改名 → 移动入库 Emby 媒体库
 
 流程:
-  1. qBittorrent "下载完成后运行外部程序" 触发本脚本(仅指定分类的任务, 其他种子一律跳过)
+  1. qBittorrent "下载完成后运行外部程序" 触发本脚本(仅分类=ani-rss 的任务, 其他种子一律跳过)
   2. 将任务媒体文件转移到独立工作区, 方式可选(TRANSFER_MODE):
        "no_seed" 不做种: 直接移动(暂存不留副本, 种子任务按 SEED_ACTION 处理)
        "seed"    做种:   硬链接(跨盘回退复制), 下载目录原文件保留, qB 继续做种
-  3. 在工作区调用外部改名工具(自动喂入 y 确认), 校验输出;
-     工具解析不了原始名(如英文点分名 Tokyo.Revengers.S04E02...mkv)时, 按 qB 任务名
-     预改写为「[组] 标题 - NN」形态自动重试一次(仍失败则保留现场 + failures.jsonl + 告警)
-  4. 搜索匹配目标文件夹(全部库根, 含 NSFW 库根):
-       缓存 → 库内已有目录(忽略年份/繁简/标点) → Bangumi 规范名对齐 → ani-rss 目录名回退
+  3. 在工作区调用 番剧批量重命名(字幕版).exe(自动喂入 y 确认), 校验输出
+     * 英文点分(scene)发布名(如 ToonsHub "Now.That.I...Girls.S01E01.1080p....MSubs-ToonsHub"),
+       工具完全不认 -> 改名前自动还原为 "[组] 标题 - SxxEyy.ext"; 万一仍失败, 再按 qB 任务名兜底重试
+  4. 搜索匹配目标文件夹(全部库根 E/F):
+       缓存 → 库内已有目录(忽略年份/繁简/标点) → Bangumi 规范名对齐
+       → TMDB 反查兜底(非中文发布名: 中文名二次反查后对齐既有目录/新建) → ani-rss 目录名回退
      规则 A: 库内已有同一部番剧时, 新一季**对齐既有目录**, 不另建分叉目录
-     规则 B: 目录年份**必须对齐 TMDB 首播年**(经 Emby RemoteSearch 反查, 无需 TMDB API Key)。
+     规则 B: 目录年份**必须对齐 TMDB 首播年**(经 Emby RemoteSearch 反查, 无需 API Key)。
              年份不符时自动重命名既有目录并同步 tvshow.nfo。
              ⚠ 这是 Emby 能匹配到 TMDB 元数据的前提: 年份错(如第二季年 2026 而首播年 2022)
                会让 Emby 检索 TMDB 得到 0 条结果, 条目退化为无元数据(ProviderIds 为空)。
-     规则 C: TMDB 把多 cours 合成单季时(如 2024 版乱马½「本篇」36 集连续编号),
-             ani-rss 拆出的多余 Season 自动归并到 TMDB 实际存在的季(集号不变)
-     规则 D: ani-rss 用跨季连续集号时(如 S1 共 13 集, S2 第一集被标 S02E14),
-             按 TMDB 每季重排编号自动改写为 S02E01
-     规则 E: 配置级兜底 SEASON_OVERRIDES = 季归属手工覆写(show/file 双命中 -> 强制归季)
-             + ep_offset 绝对集号续排(续作并入 TMDB 合并单季时 E -> E+N),
-             用于"ani-rss 季号 / 文件名季号 / TMDB 季结构"三方打架且自动裁决不动时
   5. 季号以 ani-rss(TMDB) 为准, 同步修正文件名 Sxx
-  6. 匹配成功 → 移入 <库根>\<文件夹>\Season N\;
-     未匹配   → 不入库, 改名后文件移入 <工具目录>\待归档\<任务名>\, 可 --retry 重试
-  7. 同集冲突裁决顺序: ① 订阅主/备组角色 → ② 全局组优劣表(优选/未评级/次选)
-     → ③ 同组新版(v2 修复版)整套替换 → ④ 同大小去重 / 不同大小旧版移冲突备份。
-     主组已在库→备组新文件直接丢弃; 新到主组、库内为备组→整套替换(旧移冲突备份)。
+  6. 匹配成功 → 移入 <库根>\\<文件夹>\\Season N\\(扁平结构);
+     未匹配   → 不入库, 改名后文件移入 F:\\BangumiTools\\待归档\\<任务名>\\, 可 --retry 重试
+  7. 同集冲突(按主/备组角色): 主组已在库→备组新文件直接丢弃; 新到主组、库内为备组→整套替换(旧移冲突备份); 角色不明→同大小去重/不同大小旧移冲突备份, 新入库
   8. 处理完成后清理暂存中变空的目录; 无法识别残留 → _残留待处理;
-     日志按天分段(logs/rename_move_YYYY-MM-DD.log), 文件内再按"一次运行"分段(段头关键词+
-     参数, 段尾退出码/用时/事件数); 超 2MB 滚动 .1/.2, 超 30 天自动清理; 失败另记 failures.jsonl
-  9. 每次运行收尾可向钉钉群机器人推送**一条汇总卡片**(成功/跳过/失败/重试 + WARN/ERROR 明细),
+     日志按天分段(logs/rename_move_YYYY-MM-DD.log), 文件内再按"一次运行"分段; 失败另记 failures.jsonl
+  9. 每次运行收尾向钉钉群机器人推送**一条汇总卡片**(成功/跳过/失败 + WARN/ERROR 明细),
      由 DINGTALK_* 配置控制; 推送失败只写日志, 不影响入库。自检: python qb_rename_move.py --test-notify
 
 qBittorrent 设置(下载完成后运行外部程序):
-  pythonw.exe qb_rename_move.py "%N" "%F" "%D" "%L" "%G" "%I"
-  (%L=分类, %G=标签; 注意 %C 是文件数不是分类, 不要用)
-用法:
-  python qb_rename_move.py            # qB autorun 正常入口
-  python qb_rename_move.py --retry    # 重扫 待归档\ 目录补归档
-  python qb_rename_move.py --dry-run  # 演练(工作区用硬链接, 不动真实文件)
-  python qb_rename_move.py --seed     # 本次运行强制做种(硬链接/复制, 保留源文件)
-  python qb_rename_move.py --no-seed  # 本次运行强制不做种(直接移动)
-  python qb_rename_move.py --test-notify  # 钉钉通知链路自检
+  C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python312\\pythonw.exe "F:\\BangumiTools\\qb_rename_move.py" "%N" "%F" "%D" "%L" "%G" "%I"
 """
 
 import base64
@@ -64,48 +48,29 @@ from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
 
 # ============================== 配置 ==============================
-# 全部个人化配置均可通过环境变量覆盖(见 README), 下方为带示例的默认值。
-
-
-def _env(name, default=""):
-    """环境变量取值; 未设置或空串时用 default"""
-    v = os.environ.get(name)
-    return v if v else default
-
-
-def _env_list(name, default=""):
-    """按 | 分隔的环境变量列表(去空白、去空项)"""
-    return [p.strip() for p in _env(name, default).split("|") if p.strip()]
-
-
-def _env_flag(name, default=False):
-    v = os.environ.get(name)
-    if v is None or v == "":
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "on")
-
-
 # 工具目录: 脚本 / 改名 exe / 日志 / 工作区 / 依赖 集中于此, 与下载暂存区**严格分开**。
 # 为什么必须分开: STAGE_DIR 是 ani-rss 的下载落点, 处理干净时应当只剩下载内容;
 # 工具文件混在里面会让「暂存是否清空」无法判断, 也容易被当成残留或误加种子。
-TOOLS_DIR = _env("QBR_TOOLS_DIR", os.path.dirname(os.path.abspath(__file__)))
-_TOOLS_PARENT = os.path.dirname(TOOLS_DIR.rstrip("\\/")) or TOOLS_DIR
-# 改名工具(第三方 exe, 需自备; 只扫描其工作目录, 执行前从 stdin 读入 y 确认)
-RENAME_EXE = _env("QBR_RENAME_EXE", os.path.join(TOOLS_DIR, "番剧批量重命名(字幕版).exe"))
-# 媒体库根目录列表(多个根用 | 分隔): 匹配既有番剧目录时全部搜索; 新建目录落在第一个根
-LIBRARY_DIRS = _env_list("QBR_LIBRARY_DIRS", r"D:\Media\Bangumi")
+TOOLS_DIR = r"F:\BangumiTools"
+RENAME_EXE = os.path.join(TOOLS_DIR, "番剧批量重命名(字幕版).exe")
+# 媒体库根目录列表: 匹配既有番剧目录时全部搜索; 新建目录落在 DEFAULT_LIBRARY_DIR
+LIBRARY_DIRS = [
+    r"F:\Emby Media Part2\Bangumi",
+    r"E:\Emby Media Part1\Bangumi",
+]
 DEFAULT_LIBRARY_DIR = LIBRARY_DIRS[0]
-# NSFW 番剧库根(多个根用 | 分隔): **只参与既有目录匹配**, 新建目录仍落 DEFAULT_LIBRARY_DIR。
-# 为什么单独列: 这类内容在 Emby 是独立媒体库, 与普通番剧库分开; 不纳入搜索时,
-# 订阅更新的新集会误建进普通番剧库, 同一部番出现两个 Emby 条目
+# NSFW 番剧库根: **只参与既有目录匹配**, 新建目录仍落 DEFAULT_LIBRARY_DIR。
+# 为什么单独列: 这类内容在 Emby 是独立媒体库「NSFW bangumi」, 与普通番剧库分开;
+# 不纳入搜索时, 订阅更新的新集会误建进普通番剧库, 同一部番出现两个条目
 # (实测 2026-10-08: 黑暗召唤师在地下恋爱中 —— NSFW 库 Erai-raws 版 + 番剧库 LoliHouse 版)。
-NSFW_LIBRARY_DIRS = _env_list("QBR_NSFW_LIBRARY_DIRS", "")
+NSFW_LIBRARY_DIRS = [
+    r"F:\Emby Media Part2\NSFW bangumi",
+    r"E:\Emby Media Part1\NSFW bangumi",
+]
 # 目录匹配范围 = 全部库根(番剧 + NSFW); 新建目录只落 DEFAULT_LIBRARY_DIR
 MATCH_LIBRARY_DIRS = LIBRARY_DIRS + NSFW_LIBRARY_DIRS
-# 冲突备份(勿放在 Emby 库根内, 否则会被 Emby 索引成幽灵条目)
-CONFLICT_DIR = _env("QBR_CONFLICT_DIR", os.path.join(_TOOLS_PARENT, "MediaConflictBackup"))
-# 下载暂存根目录(ani-rss 下载落点), 处理完应只剩下载内容
-STAGE_DIR = _env("QBR_STAGE_DIR", os.path.join(_TOOLS_PARENT, "下载暂存"))
+CONFLICT_DIR = r"F:\MediaConflictBackup"   # 冲突备份(勿放在 Emby 库根内, 否则会被 Emby 索引成幽灵条目)
+STAGE_DIR = r"F:\Bangumi暂存"              # 下载暂存根目录(ani-rss 下载落点), 处理完应只剩下载内容
 WORK_DIR = os.path.join(TOOLS_DIR, "_work")
 LEFTOVER_DIR = os.path.join(TOOLS_DIR, "_残留待处理")
 UNMATCHED_DIR = os.path.join(TOOLS_DIR, "待归档")   # 搜索不到目标文件夹时, 改名后的文件暂存于此
@@ -121,7 +86,7 @@ LOG_ROTATE_KEEP = 2                 # 每天最多保留的分卷数(不含当�
 VENDOR_DIR = os.path.join(TOOLS_DIR, "_vendor")     # 本地依赖(zhconv 繁简转换), 不污染系统环境
 
 # 仅当任务分类属于该集合时才自动处理(其他种子一律跳过, 含手动加标签的)
-BANGUMI_CATEGORIES = {_env("QBR_CATEGORY", "ani-rss")}
+BANGUMI_CATEGORIES = {"ani-rss"}
 BANGUMI_TAGS = set()
 
 # 对 qB 中种子任务的处理(仅不做种模式生效, 在处理开始时前置执行):
@@ -129,35 +94,34 @@ BANGUMI_TAGS = set()
 # 先释放再搬移, 避免 qB 活动任务对被移走的文件报 I/O 错误(file_open)弹窗;
 # 代价: 若后续处理失败, 种子已不在 qB, 文件保留在暂存/待归档, 可 --retry 重试
 # 做种模式(TRANSFER_MODE="seed")下本项被忽略, 种子任务一律保留继续上传
-SEED_ACTION = _env("QBR_SEED_ACTION", "delete")
+SEED_ACTION = "delete"
 # 转移方式可选(做种开关):
 #   "no_seed" 不做种: 处理开始先按 SEED_ACTION 释放种子任务, 媒体文件从暂存直接移动到工作区, 不留副本
 #   "seed"    做种:   工作区用硬链接(同盘瞬时、不占额外空间), 跨盘自动回退为复制;
 #                     下载目录原文件保留, qB 继续做种, 不动 qB 种子任务
 # 命令行可用 --seed / --no-seed 临时覆盖本配置
-TRANSFER_MODE = _env("QBR_TRANSFER_MODE", "no_seed").lower()   # "no_seed" | "seed"
-QB_HOST = _env("QBR_QB_HOST", "http://127.0.0.1:8080")
-QB_API_KEY = _env("QBR_QB_APIKEY", "")            # qB WebUI API Key(删除种子需要; 留空则跳过)
+TRANSFER_MODE = "no_seed"   # "no_seed" | "seed"
+QB_HOST = "http://127.0.0.1:33900"
+QB_API_KEY = "qbt_kDRAWFZ74zKyqrrwUCRkJZPsNDID"
 
-# ani-rss API(主/备组角色识别): 同集冲突时主组替换备组、备组遇已入库主组直接丢弃。
-# 留空 QBR_ANIRSS_HOST/KEY 则跳过角色识别, 退回通用冲突规则(去重/备份)。
-# 注意: ani-rss 的 API Key 即 WebUI 的 apiKey(设置页可见)。
-ANIRSS_API_BASE = _env("QBR_ANIRSS_HOST", "")
-ANIRSS_API_KEY = _env("QBR_ANIRSS_KEY", "")
+# ani-rss API(主/备组角色识别): 同集冲突时主组替换备组、备组遇已入库主组直接丢弃
+ANIRSS_API_BASE = "http://192.168.5.123:7789"
+ANIRSS_API_KEY = "yrl251gpm5t2w10ndr5nqag86bjasrjjryark5y3kbdle5ymvtuxauz4fmstcc5d"
 ANIRSS_ROLES_TTL = 600   # 订阅角色缓存秒数
 
-# --- 钉钉通知(群自定义机器人 Webhook, 可选) ---
+# --- 钉钉通知(群自定义机器人 Webhook) ---
 # 群里「添加机器人 → 自定义」后取得 Webhook 地址; 安全设置三选一:
-#   加签       → 填写 QBR_DINGTALK_SECRET(SEC 开头), 脚本自动附带 timestamp+sign
+#   加签     → 填写 DINGTALK_SECRET(SEC 开头), 脚本自动附带 timestamp+sign
 #   自定义关键词 → 把关键词设为"番剧入库"(消息标题恒含该词, 可与之配套)
-#   IP 白名单   → 无需额外配置
+#   IP 白名单 → 无需额外配置
 # 通知形态: **每次脚本运行汇总为一条卡片**(非逐条刷屏), 运行中的 WARN/ERROR 明细一并附上;
 # 发送失败只写日志, 绝不中断或影响入库主流程
-DINGTALK_WEBHOOK = _env("QBR_DINGTALK_WEBHOOK", "")
-DINGTALK_SECRET = _env("QBR_DINGTALK_SECRET", "")
-DINGTALK_ENABLED = _env_flag("QBR_DINGTALK_ENABLED", bool(DINGTALK_WEBHOOK))
-DINGTALK_KEYWORD = _env("QBR_DINGTALK_KEYWORD", "番剧入库")   # 消息标题恒含该词
-DINGTALK_AT_ALL = _env_flag("QBR_DINGTALK_AT_ALL", False)     # 是否 @所有人
+DINGTALK_ENABLED = True
+DINGTALK_WEBHOOK = ("https://oapi.dingtalk.com/robot/send?access_token="
+                    "d0469f7bcd29d5a7359884c49261c3e24f89232043116f2bc4fa79797d447ede")
+DINGTALK_SECRET = ("SECea1883b6e1c6778e6db82f2f14f2c9385023271ae72ea267c9d820534fdfe130")
+DINGTALK_KEYWORD = "番剧入库"   # 消息标题恒含该词(与"自定义关键词"安全设置配套)
+DINGTALK_AT_ALL = False        # 是否 @所有人(按需求: 否)
 DINGTALK_TIMEOUT = 8           # 单次请求超时(秒); 超时即放弃推送, 不阻塞入库
 DINGTALK_INCLUDE_WARN = True   # 卡片附带本次运行的全部 WARN/ERROR 明细
 # 推送的事件类型(全部开启): start=开始处理 skip=跳过非番剧 result=入库完成
@@ -165,7 +129,7 @@ DINGTALK_INCLUDE_WARN = True   # 卡片附带本次运行的全部 WARN/ERROR �
 DINGTALK_EVENTS = {"start", "skip", "result", "fail", "retry"}
 
 USE_BGM_API = True          # 通过 Bangumi API 获取 中文名; 失败时回退原名
-BGM_UA = _env("QBR_BGM_UA", "qb-bangumi-autorename/1.0")
+BGM_UA = "daisysg-panel/1.0 (https://daisysg.xyz)"
 
 # --- TMDB 首播年权威来源(经 Emby 服务端的 RemoteSearch 反查, 无需 TMDB API Key) ---
 # 为什么必须用 TMDB: Emby 剧集匹配完全依赖 TMDB 的 "首播年"。若目录/ nfo 里的年份
@@ -173,13 +137,34 @@ BGM_UA = _env("QBR_BGM_UA", "qb-bangumi-autorename/1.0")
 # 条目退化为无元数据(ProviderIds 为空, 无封面/简介/剧集信息)。
 # 因此目录年份必须对齐 TMDB 上该剧 first_air_date 的年份, 与第几季无关。
 USE_TMDB_YEAR = True
-EMBY_HOST = _env("QBR_EMBY_HOST", "")
-EMBY_API_KEY = _env("QBR_EMBY_APIKEY", "")
+EMBY_HOST = "http://192.168.5.123:8094"
+EMBY_API_KEY = "72ed036c1bcd440c92307dd6f16e398e"
 TMDB_YEAR_TOLERANCE = 1     # 库内目录年份与 TMDB 首播年相差 > 该值时视为需校正
 # 同名不同版作品(如 乱马½ 1989 版 / 2024 重制版)在 TMDB 是独立条目。
 # ani-rss 目录年份=该季播出年, 与既有目录(第一季/旧版)年份差超过该值时不视为同一部,
 # 不并入既有目录(否则重制版内容会错进旧版目录, Emby 无法匹配分集元数据)。
 YEAR_SPLIT_GAP = 5
+# 独立新条目型续作的季结构纠正(实测 2026-10-14 魔法少女育成计划 restart):
+# ani-rss 按"第2期"给 Season 2, 但 TMDB 把它建成**独立新条目**(337277, 2026),
+# 该条目自身只有 Season 1 -> 本地 Season 2 的 Emby 分集拿不到任何元数据。
+# 判别信号: Emby 季条目"存在但完全无 provider 元数据"(无 PremiereDate/ProviderIds)
+# —— 真实 TMDB 季必带这两者(归还者 S2 / 侦探已死 S1/S2 实测)。判中则归并到 Season 1
+# 并迁移该季既有文件。若某次误判, 置 False 可完全关闭该纠正。
+TMDB_ECHO_GUARD = True
+# TMDB 官网季列表(权威季结构来源, 2026-10-14 打通):
+# Emby 的季列表只是**本地目录回声**, 无法回答"TMDB 有没有这一季"; 而 TMDB 官网
+# /tv/{id}/seasons 页面直接列出全部季(实测 337277->[1] / 230050->[1,2] /
+# 117061->[0,1,2]), 作为权威依据优先于 Emby 回声。请求要点: **不带浏览器 UA**
+# (伪装浏览器会触发 Cloudflare 挑战 403 "Just a moment...", 不带 UA 反而 200)。
+# 结果按 TMDB id 落盘缓存(见 logs/tmdb_web_seasons_cache.json)。
+TMDB_WEB_SEASONS = True
+TMDB_WEB_SEASON_TTL_DAYS = 3        # 官网季列表缓存有效期(季结构变化很慢)
+# 可选: TMDB v3 API Key(免费申请: https://www.themoviedb.org/settings/api)。
+# 填写后季列表优先走官方 API(结构化 JSON); 为空则解析官网页面(实测可用, 无需密钥)。
+# 注意: API 无密钥时返回 401 "Invalid API key" —— 这是**鉴权失败而非网络封锁**,
+# 本机到 api.themoviedb.org 的连通性正常。
+# ⚠ 本文件含密钥, 勿整份复制进公开仓库(`bangumi-rename-for-emby`)——公开版请留空值。
+TMDB_API_KEY = "348e6549d19b9dff0648a2110b20f3d1"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".m4v", ".avi", ".mov", ".wmv", ".flv", ".rmvb", ".ts", ".m2ts"}
 SUB_EXTS = {".ass", ".srt", ".ssa", ".vtt", ".sup", ".mks"}
@@ -193,7 +178,6 @@ YEAR_RE = re.compile(r"(19|20)\d{2}")
 CN_NUM = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九", 10: "十",
           11: "十一", 12: "十二"}
 TZ8 = timezone(timedelta(hours=8))
-# ==================================================================
 # ==================================================================
 
 
@@ -275,7 +259,19 @@ def _prepare_log_file():
 
 def log(msg, level="INFO"):
     line = f"[{now().strftime('%Y-%m-%d %H:%M:%S')}] [{level}] {msg}"
-    print(line)
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        # qB autorun 环境下 stdout 是 GBK 控制台, 名字含 ½/♪ 等 GBK 外字符时
+        # 会 UnicodeEncodeError 崩溃(实测 2026-11-09 乱马½) -> 用 ASCII 转义兜底
+        try:
+            import os as _os
+            enc = getattr(sys.stdout, "encoding", None) or "gbk"
+            print(line.encode(enc, "backslashreplace").decode(enc, "replace"))
+        except Exception:
+            pass
+    except Exception:
+        pass
     try:
         if _RUN["active"] and level in ("WARN", "ERROR"):
             # 运行期告警入缓冲区, 收尾时随汇总卡片一起推送(避免逐条刷屏)
@@ -447,6 +443,20 @@ def force_rmtree(path):
         pass
 
 
+def _pid_alive(pid):
+    """检测进程是否存活(仅 Windows); 检测失败时保守视为存活"""
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x00100000, False, int(pid))  # SYNCHRONIZE
+        if h:
+            k32.CloseHandle(h)
+            return True
+        return False
+    except Exception:
+        return True
+
+
 def acquire_lock(timeout_sec=1800):
     os.makedirs(WORK_DIR, exist_ok=True)
     lock = os.path.join(WORK_DIR, ".lock")
@@ -459,9 +469,20 @@ def acquire_lock(timeout_sec=1800):
             return lock
         except FileExistsError:
             try:
+                # 持有者进程已死 -> 立即视为陈旧锁(实测 2026-11-09: 崩溃弹窗
+                # 实例被强杀后遗留 .lock, 后续实例干等 30 分钟)
+                try:
+                    with open(lock, "r") as _lf:
+                        _holder = int((_lf.read() or "0").strip())
+                    if _holder and not _pid_alive(_holder):
+                        os.remove(lock)
+                        log(f"移除陈旧锁文件(持有者 PID {_holder} 已退出)", "WARN")
+                        continue
+                except (ValueError, OSError):
+                    pass
                 if time.time() - os.path.getmtime(lock) > 1800:  # 陈旧锁
                     os.remove(lock)
-                    log("移除陈旧锁文件", "WARN")
+                    log("移除陈旧锁文件(超时)", "WARN")
                     continue
             except OSError:
                 pass
@@ -694,8 +715,8 @@ def _no_window_kwargs():
     """子进程不弹控制台黑框。
 
     为什么需要: 本脚本由 qB 以 pythonw.exe 拉起 —— pythonw 是 GUI 子系统进程, 自身
-    **没有控制台**。而改名工具是控制台子系统程序(PE Subsystem=3), 当父进程无控制台时,
-    Windows 会为它**新分配一个控制台窗口**, 即用户看到的那个停留数秒的黑框。
+    **没有控制台**。而改名 exe 是控制台子系统程序(PE Subsystem=3), 当父进程无控制台时,
+    Windows 会为它**新分配一个控制台窗口**, 即用户看到的那个一闪/停留数秒的黑框。
     加 CREATE_NO_WINDOW 后子进程仍拥有控制台(标准输入输出管道照常工作), 只是不显示窗口。
     """
     kw = {}
@@ -1199,7 +1220,7 @@ ANI_RSS_DIR_RE = re.compile(r"^(?P<name>.+?)\s*\((?:19|20)\d{2}\)$")
 def ani_rss_layout(content_path):
     r"""解析 ani-rss 建立的结构 "<名称> (年份)\Season N\", 返回 (目录名, 季号);
     非该结构返回 (None, None)。
-    例: <暂存目录>\异人旅馆 (2026)\Season 2\a.mp4 -> ("异人旅馆 (2026)", 2)"""
+    例: F:\Bangumi暂存\异人旅馆 (2026)\Season 2\a.mp4 -> ("异人旅馆 (2026)", 2)"""
     if not content_path:
         return None, None
     parts = os.path.normpath(content_path).split(os.sep)
@@ -2338,10 +2359,10 @@ SEASON_OVERRIDES = [
     },
     {
         # 药屋少女的呢喃 第三季(2026-10-02 起): TMDB(220542) 是**合并单季**结构
-        # (库内仅 S1 归集, 分集 E01..E60 绝对连续)。⚠ ani-rss 已从"相对编号"
+        # (库内以 S1 归档, 分集 E01..E60 绝对连续)。⚠ ani-rss 已从"相对编号"
         # 切换为**绝对集号**直接给 [49]/[51]/[52] 等(实测 2026-10-19 [51]、
-        # 2026-10-26 [52]), 故不再需要 ep_offset 续排 —— 旧 ep_offset=48 曾把
-        # 绝对号 52 误加成 100(2026-10-26 事故)。保留 season:1 仅做季归属覆盖
+        # 2026-10-26 [52]), 故不再需要 ep_offset 续排 —— 原 ep_offset=48 曾把
+        # 绝对号 52 误加成 100(2026-10-26 事故)。保留 season:1 仅做季归属覆写
         # (把 ani-rss 的 S03 归入库内 S01)。⚠ 第三季共 12 话(E49-E60),
         # 全部完结后本条可删。
         "show": ["药屋少女的呢喃", "藥屋少女的呢喃", "药屋少女的独语",
@@ -2977,7 +2998,7 @@ def route_episode_collision(src_full, library_root, folder_name, season, fn,
 
 
 def park_unmatched(files, torrent_name, dry_run=False):
-    r"""未匹配到目标文件夹: 文件移入 <工具目录>\待归档\<任务名>\, 等待重试"""
+    r"""未匹配到目标文件夹: 文件移入 F:\BangumiTools\待归档\<任务名>\, 等待重试"""
     udir = os.path.join(UNMATCHED_DIR, safe_subdir(torrent_name))
     log(f"未搜索到匹配的目标文件夹, {len(files)} 个文件保留待归档: {udir}", "WARN")
     if not dry_run:
@@ -3125,11 +3146,11 @@ def move_into_library(workdir, torrent_name, dry_run=False, content_path=None, a
                 # 却被 +48 算成 E99)。正值偏移(续排)时, 以下两种情况都说明
                 # 原集号已是绝对集号, 不应再加偏移:
                 #   ① 结果超出该季总集数、而原集号本身仍在季内范围;
-                #   ② (v32 补) 原集号本身已 >= 该季总集数 —— 续排偏移的语义是
+                #   ② (v32 补)原集号本身已 >= 该季总集数 —— 续排偏移的语义是
                 #      "把 cours 相对集号(1..N) 续排为绝对集号", 而相对集号
                 #      不可能超过该季总集数; 一旦原集号已触及/越过总集数,
                 #      它必然是绝对集号(实测 2026-10-26 药屋 [52] 被 +48
-                #      算成 E100, 因 TMDB 该季总集数=51 时 52>51 逃过旧防护)。
+                #      算成 E100, 因 TMDB 该季总集数 51 时 52>51 逃过旧防护)。
                 _skip_off = False
                 if _ov_off > 0 and _new_ep >= 1:
                     _counts = tmdb_season_episode_counts(library_root, folder_name)
@@ -3293,10 +3314,12 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
     log(f"开始处理: {torrent_name} | 分类={category} | 路径={content_path}")
     _RUN["meta"].update(torrent=torrent_name, category=category, dry_run=dry_run)
     notify("start", f"开始处理 `{torrent_name}`")
-    # 先做全部"只读"前置校验(不碰 qB): 内容路径存在 -> 文件就绪 -> 有媒体文件。
-    # 任何一步失败都在删种子之前抛异常, 保证"删种"与"文件存在"之间不再产生
-    # 孤儿任务(实测 2026-11-06: 旧逻辑先删种后查路径, 路径不存在时种子已删、
-    # 文件残留 -> qB 反复报 missingFiles / I/O 错误)。
+    # 删种先行(实测 2026-11-09: 校验通过后再删种的窗口期里, qB 仍持有任务并对
+    # 已被移走/搬空的文件报 I/O 错误弹窗; 且旧自动删种失效的根因是 qB 重启后
+    # autorun 配置被清空, 种子滞留做种 -> 文件已入库 -> 反复 I/O 报错)。
+    # 只要确认文件确实在盘上(内容路径或保存目录任一存在)就立刻删种
+    # (deleteFiles=false, 文件保留供搬移), qB 从此不再持有这些文件,
+    # I/O 错误从根上消失。两个路径都不存在(文件真丢)才保留种子不删, 留待重试。
     # 多层嵌套目录种子容错(实测 2026-11-09 太空船 Nix-Raws): qB 的 %F 是嵌套
     # 目录深处的文件路径, 一旦该路径因 qB 移动/嵌套结构不准确而失效, 就回退到
     # %D(save_path 保存目录)递归收集, 避免"路径不存在"误判导致丢文件/孤儿。
@@ -3308,6 +3331,10 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
     if not os.path.exists(resolved_path):
         raise RuntimeError(f"内容路径不存在: {content_path}")
 
+    # 文件在盘上 -> 立即释放种子任务(删种/暂停), 之后所有失败都只影响文件搬移,
+    # 不会再让 qB 抱着被移走的文件报 I/O 错误
+    pre_release_torrent(hash_id, torrent_name, dry_run=dry_run)
+
     if not wait_content_ready(resolved_path):
         raise RuntimeError("等待文件就绪超时(仍有 .!qB 临时文件)")
 
@@ -3316,9 +3343,6 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
         log("任务中无媒体文件(视频/字幕), 仅跳过入库")
         notify("skip", "任务中无媒体文件(视频/字幕), 仅跳过入库")
         return
-
-    # 全部校验通过后才释放种子任务(删种/暂停), 避免"删了种但文件缺失"的孤儿
-    pre_release_torrent(hash_id, torrent_name, dry_run=dry_run)
 
     # 改名会丢失原始文件名, 而绝对集号提示([01_49] 的 49)与季归属信号恰在里面。
     # 以 (大小, mtime) 为键建立映射, 改名后仍可反查(改名不改动大小/mtime)
@@ -3410,6 +3434,14 @@ def process(torrent_name, content_path, save_path, category, tags, hash_id, dry_
 
 def _main():
     global TRANSFER_MODE
+    # qB autorun 环境下 stdout 为 GBK 编码, 名称含 ½/♪ 等 GBK 外字符时任何
+    # print 都会 UnicodeEncodeError 崩溃(实测 2026-11-09) -> 全局改为 replace
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            if _s and hasattr(_s, "reconfigure"):
+                _s.reconfigure(errors="replace")
+        except Exception:
+            pass
     argv = list(sys.argv[1:])
     dry_run = "--dry-run" in argv
     if "--seed" in argv:
